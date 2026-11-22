@@ -35,7 +35,14 @@ def wizard_test_ai(payload: svc.AiTestIn, request: Request):
 
 @router.post("/wizard/test-map")
 def wizard_test_map(payload: svc.MapTestIn, request: Request):
+    """按 provider_id 从预设取元数据做连通性检查；手填 style_url 保留兼容但忽略，不再要求必填。"""
     return ok(svc.test_map(payload), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.post("/wizard/test-mail")
+def wizard_test_mail(payload: svc.MailTestIn, request: Request):
+    """向导阶段试发邮件：只探测 SMTP 连通性，不落盘配置；失败返回中文原因。"""
+    return ok(svc.test_mail(payload), request_id=getattr(request.state, "request_id", ""))
 
 
 @router.post("/wizard/install")

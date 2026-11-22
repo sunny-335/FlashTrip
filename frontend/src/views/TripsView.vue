@@ -1,17 +1,27 @@
 <script setup lang="ts">
-/** 行程列表：全部 / 未完成 / 已完成筛选（读 route.query.filter）、新建对话框、卡片进规划页。 */
-import { computed, reactive, ref, watch } from 'vue'
+/** 行程列表：内容区下方做「全部 / 未完成 / 已完成」筛选（读 route.query.filter），
+ *  新建 / 编辑走 TripFormDialog（含人数、儿童、家庭），删除用「是 / 否」二次确认。
+ */
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { CalendarDays, MapPin, Plus, Loader2 } from 'lucide-vue-next'
+import { CalendarDays, MapPin, Plus, Pencil, Trash2, Users, Baby, Home } from 'lucide-vue-next'
 import { formatDate } from '@/lib/utils'
-import { ApiError } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import Button from '@/components/ui/Button.vue'
-import Input from '@/components/ui/Input.vue'
-import Select from '@/components/ui/Select.vue'
-import Dialog from '@/components/ui/Dialog.vue'
 import Badge from '@/components/ui/Badge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { normalizeFilter, useTripStore, type TripCreate, type TripFilter, type TripStatus } from '@/stores/trip'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import TripFormDialog from '@/components/trip/TripFormDialog.vue'
+import { normalizeFilter, useTripStore, type TripFilter, type Trip } from '@/stores/trip'
+
+/** 列表接口实际返回 TripOut，含人数 / 家庭字段；本地扩展用于只读展示。 */
+interface TripCard extends Trip {
+  traveler_count?: number
+  has_children?: boolean
+  children_count?: number
+  family_mode?: boolean
+  family_name?: string | null
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -27,7 +37,7 @@ const statusLabel: Record<string, string> = {
   planned: '计划中', ongoing: '进行中', completed: '已完成', archived: '已归档',
 }
 
-// query.filter 变化即重新拉取（TopNavCenter 的筛选链接也写同一 query）
+// query.filter 变化即重新拉取（顶部中央导航的筛选链接也写同一 query）
 watch(
   () => route.query.filter,
   (v) => {
@@ -41,57 +51,43 @@ function setFilter(k: TripFilter) {
   void router.push({ path: '/trips', query: { filter: k } })
 }
 
-// ---------------------------------------------------------------- 新建行程
-const dialogOpen = ref(false)
-const creating = ref(false)
-const formError = ref('')
-const form = reactive({
-  title: '',
-  destination: '',
-  start_date: '',
-  end_date: '',
-  status: 'planned',
-})
-const statusOptions = [
-  { value: 'planned', label: '计划中' },
-  { value: 'ongoing', label: '进行中' },
-  { value: 'completed', label: '已完成' },
-]
+// ---------------------------------------------------------------- 新建 / 编辑行程
+const formOpen = ref(false)
+const editingTripId = ref<string | undefined>(undefined)
 
 function openCreate() {
-  form.title = ''
-  form.destination = ''
-  form.start_date = ''
-  form.end_date = ''
-  form.status = 'planned'
-  formError.value = ''
-  dialogOpen.value = true
+  editingTripId.value = undefined
+  formOpen.value = true
+}
+function openEdit(id: string) {
+  editingTripId.value = id
+  formOpen.value = true
+}
+async function onSaved(tripId: string, created: boolean) {
+  await tripStore.load(filter.value)
+  if (created) await router.push(`/trips/${tripId}/plan`)
 }
 
-async function createTrip() {
-  if (!form.title.trim()) {
-    formError.value = '请填写行程标题'
-    return
-  }
-  formError.value = ''
-  creating.value = true
-  const payload: TripCreate = {
-    title: form.title.trim(),
-    destination: form.destination.trim() || null,
-    start_date: form.start_date || null,
-    end_date: form.end_date || null,
-    status: form.status as TripStatus,
-  }
+// ---------------------------------------------------------------- 删除行程（是 / 否 二次确认）
+const deleteTarget = ref<TripCard | null>(null)
+const deleting = ref(false)
+const deleteError = ref('')
+
+function messageOf(e: unknown): string {
+  return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
+}
+async function confirmDelete() {
+  if (!deleteTarget.value) return
+  deleting.value = true
+  deleteError.value = ''
   try {
-    const t = await tripStore.create(payload)
-    dialogOpen.value = false
+    await api.del(`/trips/${encodeURIComponent(deleteTarget.value.id)}`)
+    deleteTarget.value = null
     await tripStore.load(filter.value)
-    // 新建后立即进入规划页，可直接往待规划池添加地点
-    await router.push(`/trips/${t.id}/plan`)
   } catch (e) {
-    formError.value = e instanceof ApiError ? e.message : (e as Error).message
+    deleteError.value = messageOf(e)
   } finally {
-    creating.value = false
+    deleting.value = false
   }
 }
 
@@ -101,8 +97,20 @@ const emptyText = computed(() =>
     : '该筛选下暂无行程，试试切换到「全部」。',
 )
 
+/** 列表项按扩展类型读取人数 / 家庭字段（接口已返回，仅前端类型未声明）。 */
+const cards = computed<TripCard[]>(() => tripStore.trips as TripCard[])
+
 function openTrip(id: string) {
   void router.push(`/trips/${id}/plan`)
+}
+
+/** 人数摘要：成人数、儿童数与家庭模式一行展示。 */
+function peopleText(t: TripCard): string {
+  const total = Number(t.traveler_count) || 1
+  const parts = [`${total} 人`]
+  if (t.has_children && Number(t.children_count) > 0) parts.push(`含 ${t.children_count} 名儿童`)
+  if (t.family_mode) parts.push(t.family_name ? `家庭：${t.family_name}` : '家庭模式')
+  return parts.join(' · ')
 }
 </script>
 
@@ -116,19 +124,8 @@ function openTrip(id: string) {
       <Button size="sm" @click="openCreate"><Plus class="h-3.5 w-3.5" /> 新建行程</Button>
     </div>
 
-    <!-- 本地筛选（与顶部中央导航使用同一 query.filter） -->
-    <div class="inline-flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5">
-      <button
-        v-for="t in tabs"
-        :key="t.k"
-        class="rounded-md px-3 py-1.5 text-xs transition-colors"
-        :class="filter === t.k ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
-        @click="setFilter(t.k)"
-      >{{ t.t }}</button>
-    </div>
-
-    <div v-if="tripStore.error" class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-      {{ tripStore.error }}
+    <div v-if="tripStore.error || deleteError" class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+      {{ tripStore.error || deleteError }}
     </div>
     <div v-if="tripStore.loading" class="py-16 text-center text-sm text-muted-foreground">正在加载行程…</div>
 
@@ -140,64 +137,69 @@ function openTrip(id: string) {
     </template>
 
     <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      <button
-        v-for="t in tripStore.trips"
+      <div
+        v-for="t in cards"
         :key="t.id"
-        class="group rounded-lg border border-border bg-card p-4 text-left shadow-sm transition hover:border-primary/50 hover:shadow-md"
-        @click="openTrip(t.id)"
+        class="flex flex-col rounded-lg border border-border bg-card shadow-sm transition hover:border-primary/50 hover:shadow-md"
       >
-        <div class="flex items-start justify-between gap-2">
-          <h3 class="truncate text-sm font-medium group-hover:text-primary">{{ t.title }}</h3>
-          <Badge :variant="t.status === 'completed' ? 'secondary' : 'outline'">
-            {{ statusLabel[t.status] ?? t.status }}
-          </Badge>
+        <button class="flex-1 p-4 text-left" @click="openTrip(t.id)">
+          <div class="flex items-start justify-between gap-2">
+            <h3 class="truncate text-sm font-medium group-hover:text-primary">{{ t.title }}</h3>
+            <Badge :variant="t.status === 'completed' ? 'secondary' : 'outline'">
+              {{ statusLabel[t.status] ?? t.status }}
+            </Badge>
+          </div>
+          <p v-if="t.destination" class="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
+            <MapPin class="h-3.5 w-3.5" /> {{ t.destination }}
+          </p>
+          <p class="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
+            <CalendarDays class="h-3.5 w-3.5" />
+            {{ formatDate(t.start_date) }} — {{ formatDate(t.end_date) }}
+          </p>
+          <p class="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
+            <Users class="h-3.5 w-3.5" /> {{ peopleText(t) }}
+          </p>
+        </button>
+        <div class="flex justify-end gap-1.5 border-t border-border px-3 py-2">
+          <Button variant="outline" size="sm" @click="openEdit(t.id)"><Pencil class="h-3.5 w-3.5" /> 编辑</Button>
+          <Button variant="ghost" size="sm" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteTarget = t"><Trash2 class="h-3.5 w-3.5" /> 删除</Button>
         </div>
-        <p v-if="t.destination" class="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
-          <MapPin class="h-3.5 w-3.5" /> {{ t.destination }}
-        </p>
-        <p class="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
-          <CalendarDays class="h-3.5 w-3.5" />
-          {{ formatDate(t.start_date) }} — {{ formatDate(t.end_date) }}
-        </p>
-      </button>
+      </div>
     </div>
 
-    <!-- 新建行程对话框 -->
-    <Dialog v-model="dialogOpen" title="新建行程" description="先填基本信息，创建后即可进入三栏规划页" width="max-w-md">
-      <form class="space-y-3" @submit.prevent="createTrip">
-        <div class="space-y-1.5">
-          <label class="text-xs font-medium">标题 <span class="text-destructive">*</span></label>
-          <Input v-model="form.title" placeholder="例如：五一去成都" />
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-xs font-medium">目的地</label>
-          <Input v-model="form.destination" placeholder="例如：成都" />
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium">开始日期</label>
-            <Input v-model="form.start_date" type="date" />
-          </div>
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium">结束日期</label>
-            <Input v-model="form.end_date" type="date" />
-          </div>
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-xs font-medium">状态</label>
-          <Select v-model="form.status" :options="statusOptions" />
-        </div>
-        <div v-if="formError" class="rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
-          {{ formError }}
-        </div>
-      </form>
-      <template #footer>
-        <Button variant="outline" size="sm" :disabled="creating" @click="dialogOpen = false">取消</Button>
-        <Button size="sm" :disabled="creating" @click="createTrip">
-          <Loader2 v-if="creating" class="h-3.5 w-3.5 animate-spin" />
-          {{ creating ? '创建中…' : '创建并规划' }}
-        </Button>
-      </template>
-    </Dialog>
+    <!-- 筛选放在内容区下方：顶部导航已收敛状态切换，本页仅在此处提供筛选 -->
+    <div class="flex flex-wrap items-center justify-center gap-2 border-t border-border pt-4">
+      <span class="text-xs text-muted-foreground">按状态筛选</span>
+      <div class="inline-flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5">
+        <button
+          v-for="t in tabs"
+          :key="t.k"
+          class="min-h-9 rounded-md px-3 text-xs transition-colors"
+          :class="filter === t.k ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          @click="setFilter(t.k)"
+        >{{ t.t }}</button>
+      </div>
+    </div>
+
+    <!-- 人数 / 儿童 / 家庭说明 -->
+    <p class="flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground">
+      <Users class="h-3 w-3" /> 参加人数
+      <Baby class="ml-1 h-3 w-3" /> 儿童
+      <Home class="ml-1 h-3 w-3" /> 家庭分组，可在新建或编辑行程时设置
+    </p>
+
+    <TripFormDialog v-model="formOpen" :trip-id="editingTripId" @saved="(trip, created) => onSaved(trip.id, created)" />
+
+    <ConfirmDialog
+      :model-value="!!deleteTarget"
+      title="确定要删除这个行程吗？"
+      :message="deleteTarget ? `删除「${deleteTarget.title}」后，该行程及其内容将不再显示。` : '删除后该行程将不再显示。'"
+      confirm-text="是"
+      cancel-text="否"
+      danger
+      :busy="deleting"
+      @update:model-value="(v) => { if (!v) deleteTarget = null }"
+      @confirm="confirmDelete"
+    />
   </div>
 </template>

@@ -1,5 +1,5 @@
-/** 地图底图状态：脱敏 provider 列表、审图号/合规文案、当前底图与坐标系。
- *  后端 /map/providers 与 /map/config 的字段原样接入；密钥只在后端，前端 style 不含 key。
+/** 地图底图状态：脱敏 provider 列表、默认底图与坐标系。
+ *  后端 /map/providers 与 /map/config 的字段原样接入；密钥只在后端，前端 style 不含密钥。
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
@@ -36,9 +36,10 @@ export interface MapProvider {
 /** 对齐 /map/config 输出。 */
 export interface MapConfig {
   auditNumber: string
-  complianceNote: string
   defaultProviderId: string
   providers: MapProvider[]
+  // 后端 /map/config 不返回合规文案，保留可选字段仅为兼容旧构建
+  complianceNote?: string
 }
 
 /** 后端 coordSystem 值为 WGS84 / GCJ02 / BD09 / CGCS2000，需映射到 coord.ts 的类型。 */
@@ -54,18 +55,22 @@ export function normalizeCoord(value?: string | null): CoordSystem {
 /** 有 POI 搜索能力的国内供应商（后端 pick_provider 白名单）。 */
 export const POI_PROVIDER_IDS = ['amap', 'tianditu', 'baidu']
 
+/** 免密钥的兜底矢量 style（与后端预设 openfreemap-liberty 一致），保证任何情况下都能出图。 */
+export const DEFAULT_VECTOR_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
+
 /**
- * 生成传给 map.setStyle 的值：
- * - OpenFreeMap（无 tileUrlTemplate）→ 直接用其 style URL 字符串（远程矢量 style）；
- * - 国内三家 / Mapbox → 用后端返回的 raster style 对象，瓦片已是 /map/tiles/... 代理路径，不含密钥。
+ * 生成传给 new maplibregl.Map({ style }) / map.setStyle 的值：
+ * - style.styleUrl 存在（OpenFreeMap 等矢量引用式）→ 必须直接返回该 URL 字符串，
+ *   否则把「sources/layers 为空」的 style 对象交给 MapLibre 会得到一张空白地图；
+ * - 高德 / 百度 / 天地图 / Mapbox（raster 代理式）→ 返回后端下发的 raster style 对象，
+ *   瓦片已指向 /map/tiles/... 代理路径，URL 内不含密钥；
+ * - 信息缺失时回退到免密钥矢量 style，避免空白。
  */
 export function styleForProvider(p: MapProvider): string | MapStyleSpec {
-  if (!p.tileUrlTemplate) {
-    const url = p.style?.styleUrl || p.styleUrl
-    if (url) return String(url)
-  }
+  const styleUrl = p.style?.styleUrl || (!p.tileUrlTemplate ? p.styleUrl : null)
+  if (styleUrl) return String(styleUrl)
   if (p.style && (p.style.version || p.style.sources)) return p.style
-  return { version: 8, name: p.label, sources: {}, layers: [] }
+  return DEFAULT_VECTOR_STYLE_URL
 }
 
 export const useMapStore = defineStore('map', () => {
@@ -81,6 +86,12 @@ export const useMapStore = defineStore('map', () => {
 
   const currentProvider = computed<MapProvider | null>(
     () => providers.value.find((p) => p.id === currentProviderId.value) ?? null,
+  )
+  /** /map/config 的 defaultProviderId 对应的底图：行程页唯一底图来源。 */
+  const defaultProvider = computed<MapProvider | null>(
+    () => providers.value.find((p) => p.id === defaultProviderId.value && p.enabled)
+      ?? providers.value.find((p) => p.enabled)
+      ?? null,
   )
   const currentCoord = computed<CoordSystem>(() => normalizeCoord(currentProvider.value?.coordSystem))
   const enabledProviders = computed(() => providers.value.filter((p) => p.enabled))
@@ -127,7 +138,7 @@ export const useMapStore = defineStore('map', () => {
   return {
     providers, auditNumber, complianceNote, defaultProviderId, currentProviderId,
     switching, selectedId, loading, error,
-    currentProvider, currentCoord, enabledProviders, poiProviders,
+    currentProvider, defaultProvider, currentCoord, enabledProviders, poiProviders,
     load, select,
   }
 })

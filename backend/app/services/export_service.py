@@ -104,6 +104,9 @@ def build_pdf(*, trip: dict | None = None, days: list[dict] | None = None,
         page.line(f"日期：{date_range}", size=11)
     if trip.get("currency"):
         page.line(f"币种：{trip['currency']}", size=11)
+    people = _trip_people_line(trip)
+    if people:
+        page.line(people, size=11)
     page.line(f"共 {len(days)} 天 · {len(places)} 个地点 · {len(bookings)} 条预订", size=11)
     c.showPage()
 
@@ -164,7 +167,7 @@ def build_pdf(*, trip: dict | None = None, days: list[dict] | None = None,
         )
     page.space(12)
 
-    # 费用与合计
+    # 费用与合计（含分账模式 / 垫付人）
     page.line("费用", size=15)
     total = 0.0
     for expense in expenses or []:
@@ -172,15 +175,46 @@ def build_pdf(*, trip: dict | None = None, days: list[dict] | None = None,
             total += float(expense.get("amount") or 0)
         except (TypeError, ValueError):
             pass
+        mode = _split_mode_label(expense.get("split_mode"))
+        payer = expense.get("paid_by") or ""
+        extra = f" [分账:{mode}" + (f" 垫付:{payer}" if payer else "") + "]" if mode or payer else ""
         page.line(
             f"• [{expense.get('category') or '其他'}] {expense.get('amount') or 0} "
-            f"{expense.get('currency') or ''} {expense.get('note') or ''}",
+            f"{expense.get('currency') or ''} {expense.get('note') or ''}{extra}",
             size=10, indent=12,
         )
     page.line(f"合计：{total:.2f}", size=12)
 
     c.save()
     return buf.getvalue()
+
+
+_SPLIT_MODE_LABELS = {
+    "equal": "均摊",
+    "child_free": "儿童免账",
+    "family": "按家庭",
+    "custom": "自定义",
+    "payer_only": "仅记垫付",
+}
+
+
+def _split_mode_label(mode: Any) -> str:
+    key = str(mode or "").strip()
+    return _SPLIT_MODE_LABELS.get(key, "")
+
+
+def _trip_people_line(trip: dict) -> str:
+    """封面人数信息：出行人数 / 儿童 / 家庭模式。"""
+    count = trip.get("traveler_count")
+    if not count:
+        return ""
+    text = f"出行人数：{count} 人"
+    children = trip.get("children_count") or 0
+    if children or trip.get("has_children"):
+        text += f"（含儿童 {children} 人）"
+    if trip.get("family_mode"):
+        text += f" · 家庭模式：{trip.get('family_name') or '未命名家庭'}"
+    return text
 
 
 def _as_utc(value: Any) -> datetime:

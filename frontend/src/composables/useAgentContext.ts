@@ -1,15 +1,17 @@
-/** Agent 上下文：从当前路由 + 当前行程组装 {scope, trip_id, tab, selection, summary}。
- *  selection 由各页面通过 setAgentSelection 写入（例如选中的计划项），不属于路由。
+/** Agent 上下文：从当前路由 + 当前行程组装 {scope, tab, path, trip_id, summary}。
+ *  tab 必传，后端据此注入 system 页面提示；selection 由各页面通过 setAgentSelection 写入。
  */
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useTripStore } from '@/stores/trip'
 import { usePlanStore } from '@/stores/plan'
 
-export interface AgentContext {
+/** 用类型别名而非接口，便于直接作为页面上下文对象透传给请求体。 */
+export type AgentContext = {
   scope: string
   trip_id: string | null
   tab: string
+  path: string
   selection: Record<string, unknown> | null
   summary: string
 }
@@ -37,6 +39,11 @@ export function useAgentContext() {
     return typeof raw === 'string' && raw ? raw : null
   })
 
+  /** tab 取路由名，缺省时以路径兜底，保证后端一定能注入页面上下文提示。 */
+  const tab = computed<string>(() =>
+    String(route.name ?? '') || route.path.replace(/^\//, '').replace(/\//g, '-') || 'global',
+  )
+
   const summary = computed<string>(() => {
     const id = tripId.value
     const trip = (id ? trips.trips.find((t) => t.id === id) : null) ?? trips.currentTrip
@@ -53,12 +60,13 @@ export function useAgentContext() {
   const context = computed<AgentContext>(() => ({
     scope: scope.value,
     trip_id: tripId.value,
-    tab: String(route.name ?? ''),
+    tab: tab.value,
+    path: route.fullPath,
     selection: selection.value,
     summary: summary.value,
   }))
 
-  /** 组装 /ai/chat 请求体：messages 为后端唯一识别的对话字段，context 为审计快照。 */
+  /** 组装 /ai/chat 请求体：messages 为后端识别的对话字段，context 为页面上下文快照。 */
   function buildChatBody(messages: unknown[], extra: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       messages,
@@ -68,5 +76,5 @@ export function useAgentContext() {
     }
   }
 
-  return { context, scope, tripId, summary, buildChatBody, setAgentSelection }
+  return { context, scope, tripId, tab, summary, buildChatBody, setAgentSelection }
 }

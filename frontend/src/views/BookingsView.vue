@@ -1,8 +1,10 @@
 <script setup lang="ts">
-/** 预订页：/trips/{id}/bookings 标准 CRUD（写端点需 booking:write 权限）。 */
+/** 预订页：/trips/{id}/bookings 标准 CRUD（写端点需 booking:write 权限）。
+ *  支持关联「所属行程日 / 关联地点」（GET /plan/options），列表可按 day_id 筛选。
+ */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Plane, Plus, Trash2, Pencil, Loader2 } from 'lucide-vue-next'
+import { Plane, Plus, Trash2, Pencil, Loader2, CalendarDays } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import { formatDate, formatMoney } from '@/lib/utils'
 import Button from '@/components/ui/Button.vue'
@@ -24,7 +26,14 @@ interface Booking {
   currency: string
   status: string
   note: string | null
+  day_id: string | null
+  plan_item_id: string | null
 }
+
+/** 行程日与计划项下拉数据，来自 GET /trips/{id}/plan/options。 */
+interface PlanDay { id: string; day_index: number; date: string | null; title: string | null }
+interface PlanItem { id: string; title: string | null; type: string | null; day_id: string | null }
+interface PlanOptions { days: PlanDay[]; items: PlanItem[] }
 
 const route = useRoute()
 const tripId = computed(() => String(route.params.tripId ?? ''))
@@ -38,6 +47,9 @@ const saving = ref(false)
 const deleteTarget = ref<Booking | null>(null)
 const deleting = ref(false)
 
+const planOptions = ref<PlanOptions>({ days: [], items: [] })
+const dayFilter = ref('')
+
 const typeOptions = [
   { value: 'flight', label: '机票' }, { value: 'hotel', label: '酒店' },
   { value: 'train', label: '火车' }, { value: 'ticket', label: '门票' },
@@ -50,8 +62,44 @@ const statusOptions = [
 const typeLabel = (v: string) => typeOptions.find((o) => o.value === v)?.label ?? v
 const statusLabel = (v: string) => statusOptions.find((o) => o.value === v)?.label ?? v
 
+/** 表单下拉：首项为「不关联」，其值为空串，提交时转 null。 */
+const daySelectOptions = computed(() => [
+  { value: '', label: '不关联行程日' },
+  ...planOptions.value.days.map((d) => ({
+    value: d.id,
+    label: `第 ${d.day_index} 天${d.title ? ' · ' + d.title : ''}${d.date ? '（' + d.date + '）' : ''}`,
+  })),
+])
+const itemSelectOptions = computed(() => [
+  { value: '', label: '不关联地点' },
+  ...planOptions.value.items.map((i) => ({
+    value: i.id,
+    label: `${i.title || '未命名地点'}${i.day_id ? '' : ' · 待规划'}`,
+  })),
+])
+/** 筛选下拉：首项为「全部」。 */
+const dayFilterOptions = computed(() => [
+  { value: '', label: '全部行程日' },
+  ...planOptions.value.days.map((d) => ({
+    value: d.id,
+    label: `第 ${d.day_index} 天${d.title ? ' · ' + d.title : ''}`,
+  })),
+])
+function dayName(id: string | null): string {
+  if (!id) return ''
+  const d = planOptions.value.days.find((x) => x.id === id)
+  return d ? `第 ${d.day_index} 天${d.title ? ' · ' + d.title : ''}` : ''
+}
+function itemName(id: string | null): string {
+  if (!id) return ''
+  return planOptions.value.items.find((x) => x.id === id)?.title || '未命名地点'
+}
+
 function emptyForm() {
-  return { type: 'flight', vendor: '', booking_no: '', holder: '', start_at: '', end_at: '', amount: '', currency: 'CNY', status: 'pending', note: '' }
+  return {
+    type: 'flight', vendor: '', booking_no: '', holder: '', start_at: '', end_at: '',
+    amount: '', currency: 'CNY', status: 'pending', note: '', day_id: '', plan_item_id: '',
+  }
 }
 const form = reactive(emptyForm())
 
@@ -59,11 +107,22 @@ function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
 }
 
+async function loadPlanOptions() {
+  try {
+    planOptions.value = await api.get<PlanOptions>(`/trips/${encodeURIComponent(tripId.value)}/plan/options`)
+  } catch {
+    planOptions.value = { days: [], items: [] }
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
-  try { items.value = await api.get<Booking[]>(base.value) } catch (e) { error.value = messageOf(e) } finally { loading.value = false }
+  const url = dayFilter.value ? `${base.value}?day_id=${encodeURIComponent(dayFilter.value)}` : base.value
+  try { items.value = await api.get<Booking[]>(url) } catch (e) { error.value = messageOf(e) } finally { loading.value = false }
 }
+
+function onFilterChange() { void load() }
 
 function openCreate() {
   editingId.value = null
@@ -77,12 +136,13 @@ function openEdit(b: Booking) {
     holder: b.holder || '', start_at: toLocalInput(b.start_at), end_at: toLocalInput(b.end_at),
     amount: b.amount === null ? '' : String(b.amount), currency: b.currency || 'CNY',
     status: b.status || 'pending', note: b.note || '',
+    day_id: b.day_id || '', plan_item_id: b.plan_item_id || '',
   })
   dialogOpen.value = true
 }
 function toLocalInput(v: string | null): string {
   if (!v) return ''
-  return v.slice(0, 16) // datetime-local 只取 YYYY-MM-DDTHH:mm
+  return v.slice(0, 16) // 时间输入只取「年-月-日T时:分」
 }
 
 function body() {
@@ -91,6 +151,7 @@ function body() {
     holder: form.holder || null, start_at: form.start_at || null, end_at: form.end_at || null,
     amount: form.amount === '' ? null : Number(form.amount), currency: form.currency || 'CNY',
     status: form.status || 'pending', note: form.note || null,
+    day_id: form.day_id || null, plan_item_id: form.plan_item_id || null,
   }
 }
 
@@ -113,7 +174,7 @@ async function confirmDelete() {
   try { await api.del(`${base.value}/${deleteTarget.value.id}`); await load() } catch (e) { error.value = messageOf(e) } finally { deleting.value = false; deleteTarget.value = null }
 }
 
-onMounted(load)
+onMounted(() => { void Promise.all([load(), loadPlanOptions()]) })
 </script>
 
 <template>
@@ -124,6 +185,13 @@ onMounted(load)
         <p class="mt-0.5 text-xs text-muted-foreground">机票、酒店、火车与门票记录</p>
       </div>
       <Button size="sm" @click="openCreate"><Plus class="h-3.5 w-3.5" /> 新增预订</Button>
+    </div>
+
+    <!-- 按行程日筛选 -->
+    <div class="flex items-center gap-2">
+      <CalendarDays class="h-3.5 w-3.5 text-muted-foreground" />
+      <label class="text-xs text-muted-foreground">按行程日查看</label>
+      <div class="w-56"><Select v-model="dayFilter" :options="dayFilterOptions" @update:model-value="onFilterChange" /></div>
     </div>
 
     <p v-if="error" class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">{{ error }}</p>
@@ -142,6 +210,7 @@ onMounted(load)
               <th class="px-3 py-2 font-medium">时间</th>
               <th class="px-3 py-2 font-medium">金额</th>
               <th class="px-3 py-2 font-medium">状态</th>
+              <th class="px-3 py-2 font-medium">关联</th>
               <th class="px-3 py-2" />
             </tr>
           </thead>
@@ -155,9 +224,16 @@ onMounted(load)
               <td class="px-3 py-2 text-muted-foreground">{{ formatDate(b.start_at) }}<span v-if="b.end_at"> → {{ formatDate(b.end_at) }}</span></td>
               <td class="px-3 py-2 text-foreground">{{ formatMoney(b.amount, b.currency) }}</td>
               <td class="px-3 py-2 text-muted-foreground">{{ statusLabel(b.status) }}</td>
-              <td class="px-3 py-2 text-right">
-                <Button variant="ghost" size="sm" class="h-7 w-7 p-0" title="编辑" @click="openEdit(b)"><Pencil class="h-3.5 w-3.5" /></Button>
-                <Button variant="ghost" size="sm" class="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" title="删除" @click="deleteTarget = b"><Trash2 class="h-3.5 w-3.5" /></Button>
+              <td class="px-3 py-2 text-[11px] text-muted-foreground">
+                <span v-if="dayName(b.day_id)" class="block">{{ dayName(b.day_id) }}</span>
+                <span v-if="itemName(b.plan_item_id)" class="block">{{ itemName(b.plan_item_id) }}</span>
+                <span v-if="!dayName(b.day_id) && !itemName(b.plan_item_id)">—</span>
+              </td>
+              <td class="px-3 py-2">
+                <div class="flex justify-end gap-1.5">
+                  <Button variant="outline" size="sm" @click="openEdit(b)"><Pencil class="h-3.5 w-3.5" /> 编辑</Button>
+                  <Button variant="ghost" size="sm" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteTarget = b"><Trash2 class="h-3.5 w-3.5" /> 删除</Button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -173,9 +249,11 @@ onMounted(load)
         <div class="space-y-1"><label class="text-xs font-medium">预订号</label><Input v-model="form.booking_no" placeholder="确认编号" /></div>
         <div class="space-y-1"><label class="text-xs font-medium">持有人</label><Input v-model="form.holder" placeholder="出行人" /></div>
         <div class="space-y-1"><label class="text-xs font-medium">金额</label><Input v-model="form.amount" type="number" step="0.01" placeholder="0.00" /></div>
-        <div class="space-y-1"><label class="text-xs font-medium">币种</label><Input v-model="form.currency" placeholder="CNY" /></div>
+        <div class="space-y-1"><label class="text-xs font-medium">币种</label><Input v-model="form.currency" placeholder="例如：CNY" /></div>
         <div class="space-y-1"><label class="text-xs font-medium">开始时间</label><Input v-model="form.start_at" type="datetime-local" /></div>
         <div class="space-y-1"><label class="text-xs font-medium">结束时间</label><Input v-model="form.end_at" type="datetime-local" /></div>
+        <div class="space-y-1"><label class="text-xs font-medium">所属行程日</label><Select v-model="form.day_id" :options="daySelectOptions" /></div>
+        <div class="space-y-1"><label class="text-xs font-medium">关联地点</label><Select v-model="form.plan_item_id" :options="itemSelectOptions" /></div>
         <div class="space-y-1 sm:col-span-2"><label class="text-xs font-medium">备注</label><Input v-model="form.note" placeholder="可选" /></div>
       </div>
       <template #footer>

@@ -24,9 +24,10 @@ const variants: Record<Variant, string> = {
   ghost: 'text-foreground hover:bg-muted',
   destructive: 'bg-destructive text-destructive-foreground hover:bg-destructive/90',
 }
+// 编辑/删除等高频操作需要足够点击区：sm 至少 36px 高，default 至少 40px 高
 const sizes: Record<Size, string> = {
-  sm: 'h-8 px-3 text-xs',
-  default: 'h-9 px-4 text-sm',
+  sm: 'h-9 px-3 text-sm',
+  default: 'h-10 px-4 text-sm',
 }
 
 const cls = computed(() => cn(base, variants[props.variant], sizes[props.size]))

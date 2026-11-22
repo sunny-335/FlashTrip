@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
- * 六步安装向导编排：数据库 → 管理员 → AI → 地图 → 安全 → 确认。
- * 逐步调 test-db / test-ai / test-map / test-redis（在对应 Step 内），
- * 失败显示具体错误、允许回退修改，不静默跳过；最终 POST /wizard/install。
+ * 七步安装向导编排：数据库 → 管理员 → 人工智能 → 地图 → 邮件通知（可跳过）→ 安全 → 确认。
+ * 逐步调 test-db / test-ai / test-map / test-redis / test-mail（在对应 Step 内），
+ * 失败显示具体错误、允许回退修改；最终由 buildPayload 装配后 POST /wizard/install。
  */
 import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -11,13 +11,14 @@ import { ApiError } from '@/lib/api'
 import { clearStatusCache } from '@/router'
 import Button from '@/components/ui/Button.vue'
 import {
-  createInstallForm, createWizardProbe, generateSecretKey,
+  buildPayload, createInstallForm, createWizardProbe, generateSecretKey,
   useConfigStore, type InstallIn,
 } from '@/stores/config'
 import StepDb from './StepDb.vue'
 import StepAdmin from './StepAdmin.vue'
 import StepAi from './StepAi.vue'
 import StepMap from './StepMap.vue'
+import StepMail from './StepMail.vue'
 import StepSecurity from './StepSecurity.vue'
 import StepConfirm from './StepConfirm.vue'
 
@@ -27,12 +28,13 @@ const router = useRouter()
 const steps = [
   { key: 'database', label: '数据库' },
   { key: 'admin', label: '管理员' },
-  { key: 'ai', label: 'AI 供应商' },
-  { key: 'map', label: '地图与合规' },
+  { key: 'ai', label: '人工智能' },
+  { key: 'map', label: '地图' },
+  { key: 'mail', label: '邮件通知（可跳过）' },
   { key: 'security', label: '安全备份' },
   { key: 'confirm', label: '确认安装' },
 ]
-const components = [StepDb, StepAdmin, StepAi, StepMap, StepSecurity, StepConfirm]
+const components = [StepDb, StepAdmin, StepAi, StepMap, StepMail, StepSecurity, StepConfirm]
 
 const form = reactive<InstallIn>(createInstallForm())
 // 确保进入安全步之前也有值（StepSecurity 亦会兜底生成）
@@ -49,21 +51,28 @@ const currentComponent = computed(() => components[step.value])
 const adminValid = computed(
   () => form.admin.username.trim().length > 0
     && form.admin.password.length >= 8
-    && form.admin.password === probe.adminConfirm,
+    && form.admin.password === probe.adminConfirm
+    && probe.adminMeetsPolicy,
 )
 const aiValid = computed(
   () => probe.ai.skipped
     || (Boolean(form.ai_providers[0]?.base_url.trim()) && Boolean(form.ai_providers[0]?.model.trim())),
 )
+/** 邮件为可跳过步骤：勾选跳过即放行，否则要求服务器地址与发件地址完整。 */
+const mailValid = computed(
+  () => form.mail_skipped
+    || (Boolean(form.mail?.host?.trim()) && Boolean(form.mail?.from_addr?.trim())),
+)
 
-/** 每步可继续条件：测试/校验不满足则禁用「下一步」，不静默放行。 */
+/** 每步可继续条件：测试 / 校验不满足则禁用「下一步」，不静默放行。 */
 const canNext = computed(() => {
   switch (step.value) {
     case 0: return probe.db.ok
     case 1: return adminValid.value
     case 2: return aiValid.value
     case 3: return probe.map.ok || probe.map.skipped
-    case 4: return probe.secretBackedUp
+    case 4: return mailValid.value
+    case 5: return probe.secretBackedUp
     default: return true
   }
 })
@@ -75,21 +84,6 @@ function goStep(n: number) {
 
 function next() {
   if (canNext.value && step.value < steps.length - 1) goStep(step.value + 1)
-}
-
-/** 装配 InstallIn：脱敏字段无需处理（后端自己加密），仅需同步派生字段。 */
-function buildPayload(): InstallIn {
-  const payload: InstallIn = JSON.parse(JSON.stringify(form)) as InstallIn
-  payload.ai_providers = probe.ai.skipped
-    ? []
-    : payload.ai_providers.filter((p) => p.base_url.trim())
-  if (payload.map_providers[0]) {
-    payload.map_providers[0].audit_number = payload.audit_number
-    payload.map_default_provider_id = payload.map_providers[0].id
-  }
-  payload.redis_enabled = !probe.redis.skipped && payload.redis_url.trim().length > 0
-  payload.database_dialect = probe.db.dialect || payload.database_dialect
-  return payload
 }
 
 /** 后端 install 响应若返回（或与本地不同的）主密钥，以其为准补一次下载兜底。 */
@@ -117,18 +111,23 @@ async function submit() {
   }
   if (!adminValid.value) {
     goStep(1)
-    installError.value = '管理员账号信息不完整，请返回第 2 步处理。'
+    installError.value = '管理员账号信息或密码强度不达标，请返回第 2 步处理。'
+    return
+  }
+  if (!mailValid.value) {
+    goStep(4)
+    installError.value = '邮件配置未填写完整，请返回第 5 步补充或选择跳过。'
     return
   }
   if (!probe.secretBackedUp) {
-    goStep(4)
-    installError.value = '主密钥尚未下载备份，请返回第 5 步处理。'
+    goStep(5)
+    installError.value = '主密钥尚未下载备份，请返回第 6 步处理。'
     return
   }
   installing.value = true
   installError.value = ''
   try {
-    const res = await cfg.install(buildPayload())
+    const res = await cfg.install(buildPayload(form, probe))
     if (res.need_backup_secret && res.secret_key) backupIfNeeded(res.secret_key)
     installed.value = true
     clearStatusCache()

@@ -14,6 +14,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/install', name: 'install', component: view('Install'), meta: { standalone: true, title: '安装向导' } },
   { path: '/login', name: 'login', component: view('Login'), meta: { standalone: true, title: '登录' } },
   { path: '/invite/:token', name: 'invite', component: view('Invite'), meta: { standalone: true, title: '加入行程' } },
+  // 公开分享页：独立渲染、无 AI 按钮，且不进入安装守卫与登录守卫
+  { path: '/share/:token', name: 'share', component: view('Share'), meta: { standalone: true, public: true, hideAgent: true, title: '分享行程' } },
   { path: '/', redirect: '/dashboard' },
   { path: '/dashboard', name: 'dashboard', component: view('Dashboard'), meta: { title: '仪表盘' } },
   { path: '/footprints', name: 'footprints', component: view('Footprints'), meta: { title: '足迹' } },
@@ -25,6 +27,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/trips/:tripId/expenses', name: 'trip-expenses', component: view('Expenses'), meta: { title: '费用' } },
   { path: '/trips/:tripId/packing', name: 'trip-packing', component: view('Packing'), meta: { title: '物品' } },
   { path: '/trips/:tripId/moments', name: 'trip-moments', component: view('Moments'), meta: { title: '瞬间' } },
+  // 足迹地图点击进入「该行程的记忆」：与全局记忆页共用视图，按 tripId 过滤
+  { path: '/trips/:tripId/memories', name: 'trip-memories', component: view('Memories'), meta: { title: '行程记忆' } },
   { path: '/trips/:tripId/collab', name: 'trip-collab', component: view('Collab'), meta: { title: '协作' } },
   { path: '/settings', name: 'settings', component: view('Settings'), meta: { title: '设置', hideAgent: true } },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
@@ -64,6 +68,8 @@ async function isAuthenticated(): Promise<boolean> {
 }
 
 router.beforeEach(async (to) => {
+  // 公开页（分享行程）跳过安装守卫与登录守卫，未登录也可访问
+  if (to.meta.public) return true
   const status = await wizardStatus()
 
   if (!status.installed) {

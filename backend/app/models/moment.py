@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.security import new_id
@@ -26,3 +26,5 @@ class Moment(Base, TimestampMixin, SoftDeleteMixin):
     coord_system: Mapped[str] = mapped_column(String(16), nullable=False, default="WGS84")
     taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     media_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 是否允许出现在公开分享页；默认私有，分享只汇总 is_public=True 的瞬间
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

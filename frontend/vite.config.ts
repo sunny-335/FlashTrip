@@ -15,6 +15,8 @@ export default defineConfig({
     },
   },
   build: {
+    // public/ 下的图标、manifest.webmanifest、sw.js 由 Vite 原样复制到 dist，
+    // 离线能力用手写 Service Worker 实现，不引入 vite-plugin-pwa，故无需额外配置。
     outDir: 'dist',
     assetsDir: 'assets',
     sourcemap: false,

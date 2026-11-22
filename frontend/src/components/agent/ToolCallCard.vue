@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /** 工具调用卡：只读工具直接展示结果；写类工具（needConfirm）展示「确认 / 取消」。
  *  确认由 AgentPanel 汇总后以 confirmToolCalls 回传 /ai/chat，后端执行时走同一套权限校验。
+ *  删除行程为危险操作，按钮文案用「是 / 否」，并由 store 回传 confirm:"yes"。
  */
 import { computed, ref } from 'vue'
 import { Wrench, ShieldAlert, Check, X, Loader2, ChevronDown } from 'lucide-vue-next'
-import type { ToolCall } from '@/stores/agent'
+import { toolLabel, type ToolCall } from '@/stores/agent'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
 
@@ -12,16 +13,8 @@ const props = withDefaults(defineProps<{ call: ToolCall; busy?: boolean }>(), { 
 const emit = defineEmits<{ confirm: [call: ToolCall]; cancel: [call: ToolCall] }>()
 const expanded = ref(false)
 
-const TOOL_LABELS: Record<string, string> = {
-  list_trips: '列出行程',
-  get_plan: '读取行程安排',
-  get_expenses: '读取费用',
-  search_poi: '搜索地点',
-  add_plan_item: '新增行程条目',
-  move_plan_item: '移动行程条目',
-  create_booking: '新增预订',
-}
-const label = computed(() => TOOL_LABELS[props.call.name] ?? props.call.name)
+const label = computed(() => toolLabel(props.call.name))
+const isDelete = computed(() => props.call.name === 'delete_trip')
 const argsText = computed(() => JSON.stringify(props.call.arguments ?? {}, null, 2))
 const resultText = computed(() => {
   const r = props.call.result
@@ -54,7 +47,8 @@ const statusLabel: Record<string, string> = {
 
     <p v-if="call.needConfirm" class="mt-1.5 flex items-start gap-1 text-amber-700">
       <ShieldAlert class="mt-0.5 h-3 w-3 shrink-0" />
-      {{ call.message || '该操作会修改行程数据，请确认后执行' }}
+      <span v-if="isDelete">删除行程不可恢复，请回答「是」确认；选择「否」即取消本次操作</span>
+      <span v-else>{{ call.message || '该操作会修改行程数据，请确认后执行' }}</span>
       <span v-if="call.permission" class="font-mono text-[10px]">（{{ call.permission }}）</span>
     </p>
 
@@ -70,10 +64,10 @@ const statusLabel: Record<string, string> = {
 
     <div v-if="waiting" class="mt-2 flex gap-1.5">
       <Button size="sm" class="h-7 px-2.5 text-[10px]" :disabled="busy" @click="emit('confirm', call)">
-        <Check class="h-3 w-3" /> 确认
+        <Check class="h-3 w-3" /> {{ isDelete ? '是' : '确认' }}
       </Button>
       <Button variant="outline" size="sm" class="h-7 px-2.5 text-[10px]" @click="emit('cancel', call)">
-        <X class="h-3 w-3" /> 取消
+        <X class="h-3 w-3" /> {{ isDelete ? '否' : '取消' }}
       </Button>
     </div>
   </div>

@@ -2,11 +2,11 @@
  * 三栏拖拽编排：
  * - 分组列表 lists：key 为 day.id 或 POOL_KEY，作为 VueDraggable 的 v-model。
  * - new_sort_key 由前端 keyBetween(before, after) 计算，后端仅做字典序校验。
- * - 乐观更新 + 失败回滚原数组；useUndoableMoves 维护命令栈，Ctrl+Z 撤销。
+ * - 乐观更新 + 失败回滚原数组；useUndoableMoves 维护命令栈，撤销快捷键统一在 TripPlanView 注册。
  * - 移动端不走 Sortable，改用 moveByButton 生成同样的 MoveIn。
  */
 import {
-  computed, inject, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref,
+  computed, inject, nextTick, provide, reactive, ref,
   type ComputedRef, type InjectionKey, type Ref,
 } from 'vue'
 import { ApiError } from '@/lib/api'
@@ -16,6 +16,7 @@ import {
   type MoveIn,
   type PlanItem,
   type PlanItemCreate,
+  type PlanItemPatch,
   type PlanSnapshot,
   type PlanType,
   type TripDay,
@@ -60,6 +61,22 @@ export function usePlanDnd() {
   const lists = reactive<Record<string, PlanItem[]>>({})
   const error = ref('')
   const busy = ref(false)
+  /** 是否正在拖拽：SortableJS @start 置真、@end 置假，卡片据此避免拖拽中误触发点击。 */
+  const dragging = ref(false)
+  /** 最近一次拖拽结束时间：用于抑制拖拽结束后浏览器补发的那一次 click。 */
+  let lastDragEndAt = 0
+
+  function onStartDrag(): void {
+    dragging.value = true
+  }
+  function markDragEnd(): void {
+    dragging.value = false
+    lastDragEndAt = Date.now()
+  }
+  /** 拖拽刚结束的短时间内，整卡点击应被忽略，避免「拖完就弹出修改弹窗」。 */
+  function wasJustDragged(): boolean {
+    return dragging.value || Date.now() - lastDragEndAt < 300
+  }
 
   const days = computed<TripDay[]>(() => store.days)
   const allItems = computed<PlanItem[]>(() => store.allItems)
@@ -144,6 +161,8 @@ export function usePlanDnd() {
    * 此时 store 尚未乐观变更，故 snapshot 即为「拖拽前」快照。
    */
   async function onEnd(evt: DragEndEvent): Promise<void> {
+    // 无论是否成功移动，都标记「刚拖拽过」，抑制随后补发的 click
+    markDragEnd()
     const movedId = evt.item?.getAttribute('data-id')
     const domToKey = groupOfElement(evt.to)
     if (!movedId) {
@@ -290,24 +309,32 @@ export function usePlanDnd() {
     if (idx >= 0) store.days[idx] = { ...store.days[idx], ...updated }
   }
 
-  function onKey(e: KeyboardEvent): void {
-    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== 'z') return
-    const t = e.target as HTMLElement | null
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
-    e.preventDefault()
-    void undoLast()
+  /**
+   * 编辑条目：乐观合并本地 → 真实 PUT → 用服务端返回值对齐；失败回滚原数组。
+   * 快捷键统一由 TripPlanView 注册，本 composable 不再监听键盘。
+   */
+  async function updateItem(itemId: string, patch: PlanItemPatch): Promise<void> {
+    error.value = ''
+    const before = store.snapshot()
+    const item = store.findItem(itemId)
+    if (item) Object.assign(item, patch)
+    rebuild()
+    try {
+      const updated = await store.updateItem(itemId, patch)
+      store.replaceLocal(updated)
+      rebuild()
+    } catch (e) {
+      store.restore(before)
+      rebuild()
+      error.value = messageOf(e)
+      throw e
+    }
   }
-  onMounted(() => {
-    if (typeof window !== 'undefined') window.addEventListener('keydown', onKey)
-  })
-  onBeforeUnmount(() => {
-    if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey)
-  })
 
   return {
-    lists, days, allItems, error, busy, canUndo,
-    load, rebuild, onEnd, moveByButton, undoLast,
-    addItem, deleteItem, importItems, addDay, updateDay,
+    lists, days, allItems, error, busy, canUndo, dragging,
+    load, reload, rebuild, onEnd, onStartDrag, markDragEnd, wasJustDragged, moveByButton, undoLast,
+    addItem, updateItem, deleteItem, importItems, addDay, updateDay,
   }
 }
 
@@ -320,6 +347,10 @@ export interface PlanContext {
   openAdd: (type: PlanType, dayId?: string | null) => void
   openImport: (mode: 'file' | 'list') => void
   remove: (id: string) => void
+  /** 点击卡片：打开完整修改弹窗。 */
+  openEdit: (item: PlanItem) => void
+  /** 点击卡片时间区：打开重排操作（智能重排 / 交给智能助手）。 */
+  openRearrange: (item: PlanItem) => void
 }
 
 export const PLAN_CTX: InjectionKey<PlanContext> = Symbol('flashtrip-plan-context')

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 安装引导页（standalone）：已安装则回登录页，否则渲染六步向导。 */
+/** 安装引导页（standalone）：已安装则回登录页，否则渲染七步向导。 */
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/stores/config'

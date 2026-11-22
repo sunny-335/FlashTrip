@@ -1,4 +1,4 @@
-/** 安装向导状态、配置预设与 test-* / install 请求封装。字段名严格对齐 install_service.py。 */
+/** 安装向导状态、配置预设与 test-* / install 请求封装。字段名严格对齐后端契约。 */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '@/lib/api'
@@ -15,7 +15,7 @@ export interface WizardStatus {
   version: string
 }
 
-// ---- 供应商预设：base_url 可覆盖；模型名一律来自 /models 或手填，绝不硬编码 ----
+// ---- AI 供应商预设：base_url 可覆盖；模型名一律来自 /models 或手填，绝不硬编码 ----
 export interface AiPreset {
   id: string
   label: string
@@ -31,33 +31,61 @@ export const AI_PRESETS: AiPreset[] = [
   { id: 'custom', label: '自定义（兼容 OpenAI /v1）', base_url: '', needs_token: true },
 ]
 
+/**
+ * 地图供应商预设：只保留品牌名与只读元数据（署名词 / 审图号）。
+ * 样式地址、瓦片模板、坐标系、是否需要密钥等技术字段一律由后端预设自动带出，
+ * 前端不再手填、也不在下拉里展示内部状态。id 与后端 PROVIDER_DEFS 严格一致。
+ */
 export interface MapPreset {
   id: string
   label: string
-  style_url: string
-  tile_url_template: string
-  coord_system: string
   attribution: string
-  needs_token: boolean
+  auditNumber: string
 }
-// 仅 OpenFreeMap 提供确切免 token 底图地址；其余留空由用户在向导填写，不臆造瓦片 URL。
 export const MAP_PRESETS: MapPreset[] = [
-  {
-    id: 'openfreemap',
-    label: 'OpenFreeMap · Liberty（免 token，境外合规）',
-    style_url: 'https://tiles.openfreemap.org/styles/liberty',
-    tile_url_template: '',
-    coord_system: 'WGS84',
-    attribution: '© OpenFreeMap · © OpenStreetMap contributors',
-    needs_token: false,
-  },
-  { id: 'amap', label: '高德（GCJ-02，需 key）', style_url: '', tile_url_template: '', coord_system: 'GCJ-02', attribution: '© 高德地图', needs_token: true },
-  { id: 'baidu', label: '百度（BD-09，需 key）', style_url: '', tile_url_template: '', coord_system: 'BD-09', attribution: '© 百度地图', needs_token: true },
-  { id: 'tianditu', label: '天地图（CGCS2000，需 key）', style_url: '', tile_url_template: '', coord_system: 'CGCS2000', attribution: '© 天地图', needs_token: true },
-  { id: 'mapbox', label: 'Mapbox（需 token）', style_url: '', tile_url_template: '', coord_system: 'WGS84', attribution: '© Mapbox', needs_token: true },
+  { id: 'openfreemap-liberty', label: 'OpenFreeMap · Liberty', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'openfreemap-bright', label: 'OpenFreeMap · Bright', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'openfreemap-positron', label: 'OpenFreeMap · Positron', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'openfreemap-dark', label: 'OpenFreeMap · Dark', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'openfreemap-fiord', label: 'OpenFreeMap · Fiord', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'openfreemap-3d', label: 'OpenFreeMap · 3D', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'mapbox', label: 'Mapbox', attribution: '© Mapbox · © OpenStreetMap contributors', auditNumber: '' },
+  { id: 'amap', label: '高德地图', attribution: '© 高德地图', auditNumber: '' },
+  { id: 'baidu', label: '百度地图', attribution: '© 百度地图', auditNumber: '' },
+  { id: 'tianditu', label: '天地图', attribution: '© 天地图', auditNumber: '' },
 ]
 
-// ---- 与 install_service.InstallIn 一致 ----
+/** 邮件配置：与后端 mail 段字段一致；password 留空表示保留已保存密文。 */
+export interface MailConfigIn {
+  enabled: boolean
+  host: string
+  port: number
+  user: string
+  password: string
+  from_addr: string
+  from_name: string
+  use_ssl: boolean
+  use_tls: boolean
+  timeout_s: number
+  default_recipients: string[]
+}
+export function createMailConfig(): MailConfigIn {
+  return {
+    enabled: false,
+    host: '',
+    port: 465,
+    user: '',
+    password: '',
+    from_addr: '',
+    from_name: '瞬旅 FlashTrip',
+    use_ssl: true,
+    use_tls: false,
+    timeout_s: 10,
+    default_recipients: [],
+  }
+}
+
+// ---- 与后端 InstallIn / ConfigUpdateIn 一致 ----
 export interface AdminIn {
   username: string
   password: string
@@ -75,17 +103,11 @@ export interface AiProviderIn {
   timeout_s: number
   supports_stream: boolean
 }
+/** 设置页 / 向导只提交 id、密钥与启用开关，技术元数据由后端预设带出。 */
 export interface MapProviderIn {
   id: string
   key: string
-  style_url: string
-  tile_url_template: string
-  default_style: string
-  coord_system: string
-  attribution: string
-  audit_number: string
   enabled: boolean
-  needs_token: boolean
 }
 export interface InstallIn {
   database_url: string
@@ -99,6 +121,9 @@ export interface InstallIn {
   audit_number: string
   ai_tools_enabled: boolean
   secret_key: string
+  /** 邮件配置：跳过时为 null；未跳过时并入安装请求，安装完成后亦可在设置页修改。 */
+  mail: MailConfigIn | null
+  mail_skipped: boolean
 }
 
 // ---- test-* 响应 ----
@@ -106,6 +131,7 @@ export interface DbTestResult { ok: boolean; dialect: string; version: string }
 export interface RedisTestResult { ok: boolean; enabled: boolean; message?: string }
 export interface AiTestResult { ok: boolean; models: string[] }
 export interface MapTestResult { ok: boolean; status_code?: number; skipped?: boolean; message?: string }
+export interface MailTestResult { ok: boolean; message: string }
 export interface InstallResult {
   installed: boolean
   need_backup_secret: boolean
@@ -119,11 +145,13 @@ export interface WizardProbe {
   ai: { ok: boolean; models: string[]; error: string; skipped: boolean; tested: boolean }
   map: { ok: boolean; status: number; error: string; skipped: boolean; tested: boolean }
   adminConfirm: string
+  /** 管理员密码是否达到四类字符 / 长度 / 无连续串的强制标准，由 PasswordStrength 回传。 */
+  adminMeetsPolicy: boolean
   secretBackedUp: boolean
   secretVisible: boolean
 }
 
-/** 初始安装表单：数据库默认 SQLite；AI/Map 各预置一条可编辑配置。 */
+/** 初始安装表单：数据库默认 SQLite；AI/Map 各预置一条可编辑配置；邮件默认不跳过。 */
 export function createInstallForm(): InstallIn {
   return {
     database_url: 'sqlite:////data/flashtrip.db',
@@ -144,23 +172,14 @@ export function createInstallForm(): InstallIn {
       },
     ],
     map_providers: [
-      {
-        id: MAP_PRESETS[0].id,
-        key: '',
-        style_url: MAP_PRESETS[0].style_url,
-        tile_url_template: '',
-        default_style: 'liberty',
-        coord_system: MAP_PRESETS[0].coord_system,
-        attribution: MAP_PRESETS[0].attribution,
-        audit_number: '',
-        enabled: true,
-        needs_token: MAP_PRESETS[0].needs_token,
-      },
+      { id: MAP_PRESETS[0].id, key: '', enabled: true },
     ],
     map_default_provider_id: MAP_PRESETS[0].id,
     audit_number: '',
     ai_tools_enabled: false,
     secret_key: '',
+    mail: createMailConfig(),
+    mail_skipped: false,
   }
 }
 
@@ -171,6 +190,7 @@ export function createWizardProbe(): WizardProbe {
     ai: { ok: false, models: [], error: '', skipped: false, tested: false },
     map: { ok: false, status: 0, error: '', skipped: false, tested: false },
     adminConfirm: '',
+    adminMeetsPolicy: false,
     secretBackedUp: false,
     secretVisible: false,
   }
@@ -183,6 +203,25 @@ export function generateSecretKey(): string {
   let bin = ''
   for (const b of bytes) bin += String.fromCharCode(b)
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/**
+ * 装配最终提交体：跳过项清空、派生字段同步、邮件配置并入安装请求。
+ * 由 InstallWizard 在 POST /wizard/install 前调用。
+ */
+export function buildPayload(form: InstallIn, probe: WizardProbe): InstallIn {
+  const payload: InstallIn = JSON.parse(JSON.stringify(form)) as InstallIn
+  payload.ai_providers = probe.ai.skipped
+    ? []
+    : payload.ai_providers.filter((p) => p.base_url.trim())
+  if (payload.map_providers[0]) {
+    payload.map_default_provider_id = payload.map_providers[0].id
+  }
+  payload.redis_enabled = !probe.redis.skipped && payload.redis_url.trim().length > 0
+  payload.database_dialect = probe.db.dialect || payload.database_dialect
+  // 跳过邮件时只带 mail_skipped 标记，不提交半填的 SMTP 配置
+  if (payload.mail_skipped) payload.mail = null
+  return payload
 }
 
 export const useConfigStore = defineStore('config', () => {
@@ -198,9 +237,12 @@ export const useConfigStore = defineStore('config', () => {
   const testRedis = (url: string) => api.post<RedisTestResult>('/wizard/test-redis', { url })
   const testAi = (payload: { base_url: string; api_key: string; timeout_s?: number }) =>
     api.post<AiTestResult>('/wizard/test-ai', { timeout_s: 10, ...payload })
-  const testMap = (payload: { style_url: string; tile_url_template: string; key: string }) =>
+  /** 只传 provider_id，连通性地址由后端预设带出，不再提交任何手填 URL。 */
+  const testMap = (payload: { provider_id: string }) =>
     api.post<MapTestResult>('/wizard/test-map', payload)
+  const testMail = (payload: MailConfigIn) =>
+    api.post<MailTestResult>('/wizard/test-mail', payload)
   const install = (payload: InstallIn) => api.post<InstallResult>('/wizard/install', payload)
 
-  return { status, loadStatus, testDb, testRedis, testAi, testMap, install }
+  return { status, loadStatus, testDb, testRedis, testAi, testMap, testMail, install }
 })

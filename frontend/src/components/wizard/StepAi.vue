@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 第 3 步：AI 供应商。base_url 来自可覆盖预设；模型名由 /models 探测下拉或手填，绝不硬编码。 */
+/** 第 3 步：人工智能供应商。接口地址来自可覆盖预设；模型名由模型清单探测或手填，绝不硬编码。 */
 import { computed, ref, watch } from 'vue'
 import { Bot, CheckCircle2 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
@@ -52,12 +52,12 @@ async function probeModels() {
   <div class="space-y-4">
     <div class="flex items-start gap-2 rounded-lg border border-border bg-muted/50 p-3 text-xs leading-relaxed text-muted-foreground">
       <Bot class="mt-0.5 h-4 w-4 shrink-0" />
-      <span>用原生 OpenAI 兼容三元组 (base_url / api_key / model) 接入。模型名通过 /models 动态探测，不预设任何具体型号；密钥加密存库、不回显前端。</span>
+      <span>用兼容 OpenAI 协议的接口地址、密钥与模型名接入。模型名通过模型清单动态探测，不预设任何具体型号；密钥加密存库、不回显前端。</span>
     </div>
 
     <label class="flex items-center gap-2 text-xs">
       <input v-model="probe.ai.skipped" type="checkbox" class="h-3.5 w-3.5 accent-[var(--primary)]" />
-      暂不配置 AI（可稍后在设置中启用）
+      暂不配置人工智能（可稍后在设置页启用）
     </label>
 
     <div v-if="!probe.ai.skipped" class="space-y-3">
@@ -67,17 +67,17 @@ async function probeModels() {
           <Select v-model="preset" :options="presetOptions" />
         </div>
         <div class="space-y-1.5">
-          <label class="text-xs font-medium">供应商 ID</label>
+          <label class="text-xs font-medium">供应商标识</label>
           <Input v-model="form.ai_providers[0].id" />
         </div>
       </div>
       <div class="space-y-1.5">
-        <label class="text-xs font-medium">Base URL（可覆盖）</label>
+        <label class="text-xs font-medium">接口地址（可覆盖）</label>
         <Input v-model="form.ai_providers[0].base_url" placeholder="https://.../v1" />
       </div>
       <div class="space-y-1.5">
-        <label class="text-xs font-medium">API Key</label>
-        <Input v-model="form.ai_providers[0].api_key" type="password" placeholder="sk-..." />
+        <label class="text-xs font-medium">密钥</label>
+        <Input v-model="form.ai_providers[0].api_key" type="password" placeholder="填入服务商提供的密钥" autocomplete="new-password" />
       </div>
 
       <div class="flex items-end gap-2">
@@ -91,7 +91,7 @@ async function probeModels() {
       </div>
       <div class="space-y-1.5">
         <label class="text-xs font-medium">或手动填写模型名</label>
-        <Input v-model="form.ai_providers[0].model" placeholder="例如服务商控制台给出的模型 ID" />
+        <Input v-model="form.ai_providers[0].model" placeholder="例如服务商控制台给出的模型标识" />
       </div>
 
       <div v-if="probe.ai.ok" class="inline-flex items-center gap-1.5 text-xs text-primary">

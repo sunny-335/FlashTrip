@@ -13,11 +13,16 @@ from app.db.base import Base, SoftDeleteMixin, TimestampMixin
 
 class Transport(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "transports"
-    __table_args__ = (Index("ix_transports_trip_id", "trip_id"),)
+    __table_args__ = (
+        Index("ix_transports_trip_id", "trip_id"),
+        Index("ix_transports_trip_day", "trip_id", "day_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     trip_id: Mapped[str] = mapped_column(String(36), nullable=False)
     plan_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 可归集到某个行程日（与 0004_extended 迁移对齐）
+    day_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     mode: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
     from_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     to_name: Mapped[str | None] = mapped_column(String(128), nullable=True)

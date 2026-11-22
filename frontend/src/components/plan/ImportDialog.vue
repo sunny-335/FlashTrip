@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 导入对话框：Import file（json/csv/txt）/ List Import（粘贴清单）。
+ * 导入对话框：导入文件（json/csv/txt）/ 清单导入（粘贴清单）。
  * 前端解析为结构化 PlanItemCreate[]，用 keysBetween 生成合法 sort_key 后提交 /plan/import。
  */
 import { computed, ref, watch } from 'vue'
@@ -132,7 +132,7 @@ async function submit() {
 </script>
 
 <template>
-  <Dialog v-model="open" :title="props.mode === 'file' ? 'Import file' : 'List Import'" description="解析后统一进入待规划池，可再拖到各天">
+  <Dialog v-model="open" :title="props.mode === 'file' ? '导入文件' : '清单导入'" description="解析后统一进入待规划池，可再拖到各天">
     <div class="space-y-3">
       <div v-if="props.mode === 'file'" class="space-y-1.5">
         <label class="text-xs font-medium">选择文件（.json / .csv / .txt）</label>

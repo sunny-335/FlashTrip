@@ -144,11 +144,9 @@ onMounted(load)
         <Card v-for="list in lists" :key="list.id">
           <div class="mb-3 flex items-center justify-between gap-2">
             <h2 class="truncate text-sm font-semibold text-foreground">{{ list.name }}</h2>
-            <div class="flex shrink-0 gap-0.5">
-              <Button variant="ghost" size="sm" class="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" title="删除清单" @click="deleteListTarget = list">
-                <Trash2 class="h-3.5 w-3.5" />
-              </Button>
-            </div>
+            <Button variant="ghost" size="sm" class="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteListTarget = list">
+              <Trash2 class="h-3.5 w-3.5" /> 删除清单
+            </Button>
           </div>
           <div class="space-y-1">
             <div v-for="item in list.items ?? []" :key="item.id" class="flex items-center gap-2 rounded-md px-1.5 py-1 hover:bg-muted">
@@ -162,9 +160,9 @@ onMounted(load)
                 {{ item.name }}
               </span>
               <span class="shrink-0 text-[10px] text-muted-foreground">×{{ item.qty }}</span>
-              <button class="shrink-0 text-muted-foreground hover:text-destructive" title="删除条目" @click="removeItem(list, item)">
-                <Trash2 class="h-3 w-3" />
-              </button>
+              <Button variant="ghost" size="sm" class="shrink-0 text-muted-foreground hover:text-destructive" @click="removeItem(list, item)">
+                <Trash2 class="h-3.5 w-3.5" /> 删除
+              </Button>
             </div>
             <p v-if="!(list.items ?? []).length" class="py-2 text-center text-[11px] text-muted-foreground">清单还是空的</p>
           </div>

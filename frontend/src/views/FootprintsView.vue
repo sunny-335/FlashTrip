@@ -1,6 +1,8 @@
 <script setup lang="ts">
-/** 足迹页：跨行程聚合 moments 中带坐标的点，用小型地图 + 坐标列表展示。
+/** 足迹页：跨行程聚合 moments 中带坐标的点，以完整地图为主视图 + 坐标列表。
  *  后端无全局瞬间端点，故先取 /trips?status=all，再逐行程取 /trips/{id}/moments 聚合。
+ *  MapPane 只 import 使用；它不向外抛出标记点击，因此在地图外层用捕获阶段监听动态标记。
+ *  点击地图标记或列表项都进入该行程记忆，路由未注册约定路径时回退到记忆页查询参数。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -54,25 +56,56 @@ const geocoded = computed(() =>
     .sort((a, b) => (b.taken_at || '').localeCompare(a.taken_at || '')),
 )
 
-/** 复用 MapPane 的精简点数据（WGS84，由 MapPane 按当前底图反转换）。 */
+/** 地图标记上的简短标题，同时用于捕获点击后的标题兜底匹配。 */
+function mapTitle(m: Footprint): string {
+  return m.content || m.tripTitle
+}
+
+/** 复用 MapPane 的精简点数据（全球通用坐标系，由 MapPane 按当前底图换算）。 */
 const mapPoints = computed(() => geocoded.value.map((m) => ({
   id: m.id,
   lng: m.lng,
   lat: m.lat,
-  title: m.content || m.tripTitle,
+  title: mapTitle(m),
+  subtitle: m.tripTitle,
   type: 'moment',
 })))
+
+/** 优先进入约定路径；若集成路由暂未补齐，则回退到带行程参数的记忆页。 */
+function hasTripMemoryRoute(): boolean {
+  return router.getRoutes().some((r) => r.path.includes(':tripId') && r.path.endsWith('/memories'))
+}
+
+/** 点击地图标记或列表项进入该行程的记忆页。 */
+function openMemory(tripId: string) {
+  if (hasTripMemoryRoute()) void router.push(`/trips/${tripId}/memories`)
+  else void router.push({ path: '/memories', query: { trip: tripId } })
+}
+
+/** MapPane 内部会阻断冒泡，外层使用捕获阶段识别它动态创建的标记按钮。 */
+function onMapClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  const marker = target?.closest<HTMLElement>('.ft-map-marker')
+  if (!marker) return
+  const root = event.currentTarget as HTMLElement | null
+  const markers = root ? Array.from(root.querySelectorAll<HTMLElement>('.ft-map-marker')) : []
+  const index = markers.indexOf(marker)
+  const title = marker.querySelector<HTMLElement>('.ft-map-marker__label')?.textContent?.trim() || ''
+  const hit = (index >= 0 ? geocoded.value[index] : undefined)
+    ?? geocoded.value.find((m) => mapTitle(m) === title)
+  if (hit) openMemory(hit.tripId)
+}
 
 onMounted(loadAll)
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1200px] space-y-5 px-5 py-6">
+  <div class="mx-auto flex max-w-[1200px] flex-col gap-5 px-5 py-6">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div>
         <h1 class="flex items-center gap-2 text-lg font-semibold"><Footprints class="h-5 w-5 text-primary" /> 足迹</h1>
         <p class="mt-0.5 text-xs text-muted-foreground">
-          已定位 {{ geocoded.length }} 个点 · 共 {{ all.length }} 条瞬间
+          已定位 {{ geocoded.length }} 个点 · 共 {{ all.length }} 条瞬间 · 点击地图标记或列表可进入对应行程的记忆
         </p>
       </div>
     </div>
@@ -82,13 +115,18 @@ onMounted(loadAll)
 
     <template v-else>
       <EmptyState v-if="!geocoded.length" title="还没有带坐标的足迹" description="在行程的「瞬间」里记录内容并填写经纬度，这里就会点亮地图。" :icon="Footprints">
-        <button class="text-xs text-primary hover:underline" @click="router.push('/trips')">前往行程</button>
+        <button class="min-h-9 text-xs text-primary hover:underline" @click="router.push('/trips')">前往行程</button>
       </EmptyState>
       <template v-else>
-        <div class="h-[380px] overflow-hidden rounded-lg border border-border">
+        <!-- 完整地图：占据主区、足够高度；捕获阶段监听 MapPane 的标记点击 -->
+        <div
+          class="h-[min(70vh,680px)] min-h-[420px] w-full overflow-hidden rounded-lg border border-border"
+          @click.capture="onMapClick"
+        >
           <MapPane :items="mapPoints" :show-tools="false" />
         </div>
 
+        <!-- 坐标列表：地图为主，列表为辅，整行点击进入行程记忆 -->
         <Card :padded="false">
           <h2 class="border-b border-border px-4 py-2.5 text-sm font-semibold">坐标列表</h2>
           <div class="max-h-[360px] overflow-y-auto">
@@ -97,13 +135,18 @@ onMounted(loadAll)
                 <tr>
                   <th class="px-4 py-2 font-medium">瞬间</th>
                   <th class="px-4 py-2 font-medium">行程</th>
-                  <th class="px-4 py-2 font-medium">坐标（WGS84）</th>
+                  <th class="px-4 py-2 font-medium">坐标（全球通用坐标系）</th>
                   <th class="px-4 py-2 font-medium">时间</th>
                   <th class="px-4 py-2" />
                 </tr>
               </thead>
               <tbody class="divide-y divide-border">
-                <tr v-for="m in geocoded" :key="m.id" class="hover:bg-muted/40">
+                <tr
+                  v-for="m in geocoded"
+                  :key="m.id"
+                  class="cursor-pointer hover:bg-muted/40"
+                  @click="openMemory(m.tripId)"
+                >
                   <td class="max-w-[280px] px-4 py-2">
                     <span class="block truncate text-foreground">{{ m.content || '（无文字）' }}</span>
                     <span v-if="m.mood" class="text-[10px] text-muted-foreground">{{ m.mood }}</span>
@@ -114,10 +157,9 @@ onMounted(loadAll)
                   </td>
                   <td class="px-4 py-2 text-muted-foreground">{{ formatDate(m.taken_at) }}</td>
                   <td class="px-4 py-2 text-right">
-                    <button
-                      class="inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline"
-                      @click="router.push(`/trips/${m.tripId}/moments`)"
-                    >查看 <ArrowUpRight class="h-3 w-3" /></button>
+                    <button class="inline-flex min-h-9 items-center gap-0.5 text-xs text-primary hover:underline" @click.stop="openMemory(m.tripId)">
+                      进入行程记忆 <ArrowUpRight class="h-3 w-3" />
+                    </button>
                   </td>
                 </tr>
               </tbody>

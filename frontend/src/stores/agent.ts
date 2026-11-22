@@ -1,10 +1,36 @@
-/** Agent 会话状态：对话历史、流式缓冲、工具调用与二次确认。
+/** Agent 会话状态：会话列表、对话历史、流式缓冲、工具调用与二次确认。
  *  /ai/chat 为 SSE（delta / tool_call / tool_result / done / error）；
  *  写类工具 needConfirm=true，必须由 ToolCallCard 确认后以 confirmToolCalls 回传才会执行。
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, postSSE, ApiError } from '@/lib/api'
+
+/** 工具中文标签：面板清单与工具卡片共用，避免直接把英文工具名暴露给用户。 */
+export const TOOL_LABELS: Record<string, string> = {
+  list_trips: '列出行程',
+  get_plan: '读取行程安排',
+  get_expenses: '读取费用',
+  search_poi: '搜索地点',
+  get_bookings: '读取预订',
+  get_transports: '读取交通',
+  get_packing: '读取行李清单',
+  get_moments: '读取旅途瞬间',
+  get_shares: '读取分享链接',
+  get_weather: '查询天气',
+  add_plan_item: '新增行程条目',
+  move_plan_item: '移动行程条目',
+  create_booking: '新增预订',
+  delete_trip: '删除行程',
+  rearrange_plan_times: '重排计划时间',
+  set_moment_public: '设置瞬间公开',
+  create_expense: '新增费用',
+}
+
+/** 取工具中文标签；后端新增工具时回退原名，不影响展示。 */
+export function toolLabel(name: string): string {
+  return TOOL_LABELS[name] ?? name
+}
 
 export type ToolCallStatus = 'running' | 'pending' | 'done' | 'cancelled' | 'error'
 
@@ -27,6 +53,14 @@ export interface ChatMessage {
   toolCalls?: ToolCall[]
 }
 
+export interface ConversationItem {
+  id: string
+  title?: string
+  scope?: string
+  created_at?: string
+  updated_at?: string
+}
+
 interface DeltaData { delta?: string; content?: string; notice?: string }
 interface ToolCallData {
   toolCallId?: string
@@ -44,6 +78,7 @@ interface DoneData {
   toolCalls?: { toolCallId: string; name: string; arguments: Record<string, unknown> }[]
 }
 interface ErrorData { code?: number; message?: string }
+interface HistoryRow { id?: string; role?: string; content?: string }
 
 let seq = 0
 function nextId(): string { return `m${Date.now().toString(36)}-${(seq++).toString(36)}` }
@@ -58,6 +93,9 @@ function parseArgs(raw: ToolCallData['arguments']): Record<string, unknown> {
 
 export const useAgentStore = defineStore('agent', () => {
   const conversationId = ref('')
+  const conversations = ref<ConversationItem[]>([])
+  const provider = ref('')
+  const model = ref('')
   const messages = ref<ChatMessage[]>([])
   const pendingCalls = ref<ToolCall[]>([])
   const streaming = ref(false)
@@ -172,7 +210,19 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  /** 发起一轮对话（或确认后回传）。body 的 messages / context 对齐后端 _ensure_conversation。 */
+  /** 组装 /ai/chat 请求体公共字段：对话 + 会话 + 页面上下文 + 动态模型。 */
+  function baseBody(context: Record<string, unknown>): Record<string, unknown> {
+    return {
+      messages: wireMessages(),
+      conversation_id: conversationId.value || undefined,
+      context,
+      ...context,
+      ...(provider.value ? { provider: provider.value } : {}),
+      ...(model.value ? { model: model.value } : {}),
+    }
+  }
+
+  /** 发起一轮对话（或确认后回传）。 */
   function start(body: Record<string, unknown>): void {
     controller?.abort()
     streaming.value = true
@@ -189,12 +239,7 @@ export const useAgentStore = defineStore('agent', () => {
     const content = text.trim()
     if (!content || streaming.value) return
     messages.value.push({ id: nextId(), role: 'user', content })
-    start({
-      messages: wireMessages(),
-      conversation_id: conversationId.value || undefined,
-      context,
-      ...context,
-    })
+    start(baseBody(context))
   }
 
   /** 用户点「确认」：把写工具以 confirmToolCalls 回传 /ai/chat，后端走同一套权限校验执行。 */
@@ -203,15 +248,13 @@ export const useAgentStore = defineStore('agent', () => {
     for (const c of calls) c.status = 'running'
     pendingCalls.value = []
     start({
-      messages: wireMessages(),
-      conversation_id: conversationId.value || undefined,
+      ...baseBody(context),
       confirmToolCalls: calls.map((c) => ({
         toolCallId: c.toolCallId,
         name: c.name,
-        arguments: c.arguments,
+        // 删除行程是危险操作，必须回传 confirm:"yes" 后端才会执行
+        arguments: c.name === 'delete_trip' ? { ...c.arguments, confirm: 'yes' } : c.arguments,
       })),
-      context,
-      ...context,
     })
   }
 
@@ -241,15 +284,53 @@ export const useAgentStore = defineStore('agent', () => {
     streaming.value = false
   }
 
-  async function loadConversations(): Promise<unknown[]> {
-    try { return await api.get<unknown[]>('/ai/conversations') } catch (e) {
+  /** 设置本轮对话使用的供应商与模型（来自动态 /ai/models，不硬编码）。 */
+  function setModel(nextProvider: string, nextModel: string): void {
+    provider.value = nextProvider
+    model.value = nextModel
+  }
+
+  /** 拉取历史会话列表。 */
+  async function loadConversations(): Promise<ConversationItem[]> {
+    try {
+      conversations.value = await api.get<ConversationItem[]>('/ai/conversations')
+    } catch (e) {
       if (e instanceof ApiError) error.value = e.message
-      return []
+      conversations.value = []
+    }
+    return conversations.value
+  }
+
+  /** 切换会话：加载该会话的历史消息并复用其 conversationId。 */
+  async function openConversation(id: string): Promise<void> {
+    controller?.abort()
+    controller = null
+    streaming.value = false
+    streamBuffer.value = ''
+    try {
+      const rows = await api.get<HistoryRow[]>(`/ai/conversations/${encodeURIComponent(id)}/messages`)
+      conversationId.value = id
+      messages.value = rows.map((row, index) => ({
+        id: row.id || `h${index}`,
+        role: row.role === 'user' ? 'user' : row.role === 'tool' ? 'tool' : 'assistant',
+        content: row.content ?? '',
+      }))
+      pendingCalls.value = []
+      error.value = ''
+    } catch (e) {
+      error.value = e instanceof ApiError ? e.message : '会话消息加载失败，请稍后重试'
     }
   }
 
+  /** 新建会话：清空当前对话，保留已选模型偏好。 */
+  function newConversation(): void {
+    reset()
+  }
+
   return {
-    conversationId, messages, pendingCalls, streaming, streamBuffer, error,
-    send, confirm, cancel, stop, reset, loadConversations,
+    conversationId, conversations, provider, model,
+    messages, pendingCalls, streaming, streamBuffer, error,
+    send, confirm, cancel, stop, reset, setModel,
+    loadConversations, openConversation, newConversation,
   }
 })

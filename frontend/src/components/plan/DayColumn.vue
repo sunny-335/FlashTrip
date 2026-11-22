@@ -1,5 +1,7 @@
 <script setup lang="ts">
-/** 左栏的一天：Day 序号 / 日期 / 天气 / 标题编辑 / 折叠，内部为可跨组拖拽列表。 */
+/** 左栏的一天：第 N 天 / 日期 / 天气 / 标题编辑 / 折叠，内部为可跨组拖拽列表。
+ *  空列表容器保持 min-h，空态提示 pointer-events-none 绝对铺满，让整块空白都可落点。
+ */
 import { computed, ref } from 'vue'
 import { VueDraggable } from 'vue-draggable-plus'
 import { ChevronDown, ChevronRight, Pencil, Plus, CloudSun } from 'lucide-vue-next'
@@ -71,9 +73,12 @@ async function toggleCollapse() {
         <ChevronRight v-else class="h-3.5 w-3.5" />
       </button>
       <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-1.5">
-          <span class="text-xs font-semibold">Day {{ day.day_index }}</span>
-          <span class="text-[11px] text-muted-foreground">{{ formatDate(day.date) }}</span>
+        <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <!-- 横杠只在有标题时拼接，无标题时只显示「第 N 天」+ 日期 -->
+          <span class="text-xs font-semibold">
+            第 {{ day.day_index }} 天<span v-if="day.title"> — {{ day.title }}</span>
+          </span>
+          <span v-if="day.date" class="text-[11px] text-muted-foreground">{{ formatDate(day.date) }}</span>
           <span v-if="weather" class="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground">
             <CloudSun class="h-3 w-3" /> {{ weather }}
           </span>
@@ -83,7 +88,6 @@ async function toggleCollapse() {
           <Button size="sm" class="h-7 px-2" @click="saveTitle">保存</Button>
           <Button variant="ghost" size="sm" class="h-7 px-2" @click="editing = false">取消</Button>
         </div>
-        <p v-else-if="day.title" class="truncate text-[11px] text-muted-foreground">{{ day.title }}</p>
       </div>
       <button v-if="!editing" class="rounded-md p-1 text-muted-foreground hover:bg-muted" title="编辑标题" @click="startEdit">
         <Pencil class="h-3.5 w-3.5" />
@@ -92,24 +96,30 @@ async function toggleCollapse() {
     </header>
 
     <div v-if="!day.collapsed" class="space-y-2 p-2">
-      <VueDraggable
-        v-model="list"
-        :group="{ name: 'flashtrip-plan', pull: true, put: true }"
-        :animation="120"
-        :disabled="isMobile"
-        item-key="id"
-        :data-group="day.id"
-        class="space-y-2"
-        @end="onEnd"
-      >
-        <PlanCard v-for="(item, i) in list" :key="item.id" :item="item" :index="i" :count="list.length" />
-      </VueDraggable>
-
-      <p v-if="!list.length" class="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground">
-        把右侧待规划池的条目拖到这里
-      </p>
+      <!-- 相对包裹层：容器有明确最小高度，空态提示不拦截指针，整块空白都可放置 -->
+      <div class="relative">
+        <VueDraggable
+          v-model="list"
+          :group="{ name: 'flashtrip-plan', pull: true, put: true }"
+          :animation="120"
+          :disabled="isMobile"
+          item-key="id"
+          :data-group="day.id"
+          class="relative min-h-[120px] space-y-2"
+          @start="dnd.onStartDrag"
+          @end="onEnd"
+        >
+          <PlanCard v-for="(item, i) in list" :key="item.id" :item="item" :index="i" :count="list.length" />
+        </VueDraggable>
+        <div
+          v-if="!list.length"
+          class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-dashed border-border px-3 text-center text-[11px] text-muted-foreground"
+        >
+          拖拽到此地
+        </div>
+      </div>
       <Button variant="ghost" size="sm" class="w-full" @click="openAdd('place', day.id)">
-        <Plus class="h-3.5 w-3.5" /> 添加到 Day {{ day.day_index }}
+        <Plus class="h-3.5 w-3.5" /> 添加到第 {{ day.day_index }} 天
       </Button>
       <p v-if="localError" class="text-[11px] text-destructive">{{ localError }}</p>
     </div>

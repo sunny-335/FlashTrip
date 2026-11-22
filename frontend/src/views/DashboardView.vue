@@ -2,14 +2,23 @@
 /** 仪表盘：当前行程、统计卡片、最近行程。数据来自 /trips 与 /trips/{id}/overview。 */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { CalendarDays, MapPinned, ListChecks, Layers3, ArrowUpRight, Plus, Compass } from 'lucide-vue-next'
+import { CalendarDays, MapPinned, ListChecks, Layers3, ArrowUpRight, Plus, Compass, Users, Baby, Home } from 'lucide-vue-next'
 import { formatDate } from '@/lib/utils'
 import { ApiError } from '@/lib/api'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { useTripStore, type TripOverview } from '@/stores/trip'
+import { useTripStore, type TripOverview, type Trip } from '@/stores/trip'
+
+/** 列表接口实际返回 TripOut，含人数 / 家庭字段；本地扩展用于只读展示。 */
+interface TripPeople extends Trip {
+  traveler_count?: number
+  has_children?: boolean
+  children_count?: number
+  family_mode?: boolean
+  family_name?: string | null
+}
 
 const tripStore = useTripStore()
 const router = useRouter()
@@ -34,8 +43,19 @@ const stats = computed(() => {
 })
 
 /** 优先取用户设置的当前行程；否则退回最近一条行程。 */
-const focusTrip = computed(() => tripStore.currentTrip ?? tripStore.trips[0] ?? null)
+const focusTrip = computed<TripPeople | null>(() => (tripStore.currentTrip ?? tripStore.trips[0] ?? null) as TripPeople | null)
 const recentTrips = computed(() => tripStore.trips.slice(0, 5))
+
+/** 参加人数摘要：总人数 + 儿童数 + 家庭模式。 */
+const peopleSummary = computed(() => {
+  const t = focusTrip.value
+  if (!t) return ''
+  const total = Number(t.traveler_count) || 1
+  const parts = [`${total} 人参加`]
+  if (t.has_children && Number(t.children_count) > 0) parts.push(`含 ${t.children_count} 名儿童`)
+  if (t.family_mode) parts.push(t.family_name ? `家庭模式：${t.family_name}` : '家庭模式')
+  return parts.join(' · ')
+})
 
 onMounted(async () => {
   try {
@@ -71,7 +91,7 @@ function openTrip(id: string) {
       <EmptyState
         :icon="MapPinned"
         title="还没有任何行程"
-        description="先建一条「周末去杭州」试试：把灵隐寺、西湖骑行、想住的民宿放进待规划池，再拖到 Day 1 / Day 2 排好顺序，地图上会自动连成路线。"
+        description="先建一条「周末去杭州」试试：把灵隐寺、西湖骑行、想住的民宿放进待规划池，再拖到第 1 天 / 第 2 天排好顺序，地图上会自动连成路线。"
       >
         <Button size="sm" @click="router.push('/trips')"><Plus class="h-3.5 w-3.5" /> 新建第一条行程</Button>
       </EmptyState>
@@ -114,6 +134,13 @@ function openTrip(id: string) {
             <p v-if="overview" class="mt-3 text-xs text-muted-foreground">
               已排 {{ overview.planned_count }} / {{ overview.item_count }} 个条目，{{ overview.days_count }} 天行程，{{ overview.geocoded_count }} 个地点已定位。
             </p>
+            <!-- 人数 / 儿童 / 家庭摘要 -->
+            <div v-if="peopleSummary" class="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-foreground">
+              <Users class="h-3.5 w-3.5 text-primary" />
+              <span>{{ peopleSummary }}</span>
+              <Baby v-if="focusTrip.has_children" class="ml-1 h-3.5 w-3.5 text-primary" />
+              <Home v-if="focusTrip.family_mode" class="ml-1 h-3.5 w-3.5 text-primary" />
+            </div>
             <Button class="mt-4" size="sm" @click="openTrip(focusTrip.id)">
               打开行程规划 <ArrowUpRight class="h-3.5 w-3.5" />
             </Button>

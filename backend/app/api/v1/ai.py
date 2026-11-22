@@ -53,8 +53,12 @@ def _replay(conversation_id: str, last_id: int) -> list[str]:
 
 
 def _messages(payload: dict) -> list[dict]:
+    """归一化消息数组；兼容旧前端悬浮按钮的扁平 {message: "..."} 载荷。"""
+    raw = payload.get("messages")
+    if not raw and isinstance(payload.get("message"), str) and payload["message"].strip():
+        raw = [{"role": "user", "content": payload["message"]}]
     out: list[dict] = []
-    for item in payload.get("messages") or []:
+    for item in raw or []:
         if not isinstance(item, dict):
             continue
         message: dict[str, Any] = {
@@ -69,18 +73,61 @@ def _messages(payload: dict) -> list[dict]:
     return out[-40:]
 
 
+def _context(payload: dict) -> dict:
+    """把扁平的 scope / tab / path 等页面上下文收进会话 context。"""
+    raw = payload.get("context")
+    context: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    for key in ("scope", "tab", "path", "trip_id", "tripId"):
+        value = payload.get(key)
+        if value is not None and key not in context:
+            context[key] = value
+    return context
+
+
+def _context_hint(context: dict) -> dict | None:
+    """把当前页面上下文（尤其 tab）注入为 system 消息，供模型理解用户所处页面。"""
+    tab = str(context.get("tab") or "").strip()
+    path = str(context.get("path") or "").strip()
+    scope = str(context.get("scope") or "").strip()
+    trip_id = str(context.get("trip_id") or context.get("tripId") or "").strip()
+    parts = ["以下是当前页面上下文，请据此理解用户意图："]
+    if tab:
+        parts.append(f"当前标签页 tab={tab}")
+    if path:
+        parts.append(f"当前路径 path={path}")
+    if scope:
+        parts.append(f"作用范围 scope={scope}")
+    if trip_id:
+        parts.append(f"当前行程 trip_id={trip_id}")
+    if len(parts) == 1:
+        return None
+    return {"role": "system", "content": "；".join(parts)}
+
+
 def _ensure_conversation(db: Session, user: Any, payload: dict) -> AiConversation:
     conv_id = str(payload.get("conversation_id") or payload.get("conversationId") or "")
     if conv_id:
         existing = db.get(AiConversation, conv_id)
         if existing is not None and existing.user_id == getattr(user, "id", None):
+            # 复用已有会话时合并最新页面上下文（tab 等），供后续轮次使用
+            context = _context(payload)
+            if context:
+                try:
+                    merged = json.loads(existing.context_json or "{}")
+                    if not isinstance(merged, dict):
+                        merged = {}
+                except (ValueError, TypeError):
+                    merged = {}
+                merged.update(context)
+                existing.context_json = json.dumps(merged, ensure_ascii=False)
+                db.commit()
             return existing
     conv = AiConversation(
         user_id=getattr(user, "id", None),
         trip_id=payload.get("trip_id") or payload.get("tripId") or None,
         scope=str(payload.get("scope") or "global"),
         title=str(payload.get("title") or "新对话")[:200],
-        context_json=json.dumps(payload.get("context") or {}, ensure_ascii=False),
+        context_json=json.dumps(_context(payload), ensure_ascii=False),
     )
     db.add(conv)
     db.commit()
@@ -157,14 +204,24 @@ def stop_chat(conversation_id: str, request: Request,
 def chat(request: Request, payload: dict = Body(default={}), db: Session = Depends(get_db),
          user: Any = Depends(require_permission("ai:use"))):
     """SSE 流式对话；配置错误在流开始前以标准 JSON 错误返回。"""
-    cfg = get_config_store().load()
-    provider = payload.get("provider") or None
-    if not resolve_provider_configs(cfg, preferred=provider):
+    try:
+        cfg = get_config_store().load()
+        provider = payload.get("provider") or None
+        configs = resolve_provider_configs(cfg, preferred=provider)
+    except AppError:
+        raise
+    except Exception:  # noqa: BLE001  配置解析/解密异常不得变成未捕获的 500
+        raise AppError(ErrorCode.AI_PROVIDER_ERROR, "AI 供应商配置读取失败，请检查设置") from None
+    if not configs:
         raise AppError(ErrorCode.AI_PROVIDER_ERROR, "未配置可用的 AI 供应商：请填写密钥并选择模型")
     messages = _messages(payload)
     if not messages:
         raise AppError(ErrorCode.VALIDATION, "消息不能为空")
     conv = _ensure_conversation(db, user, payload)
+    # context.tab / path / scope 注入为 system 提示，模型据此理解当前页面上下文
+    hint = _context_hint(_context(payload))
+    if hint is not None:
+        messages = [hint] + messages
 
     raw_last = request.headers.get("Last-Event-ID") or payload.get("last_event_id") or payload.get("lastEventId")
     if raw_last:
@@ -219,6 +276,26 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
     pre_calls: list[dict] = []
     pre_results: list[dict] = []
     if isinstance(confirmed, list) and confirmed:
+        # 删除行程必须先做「是」确认：未确认时整批工具都不执行（含其它工具），
+        # 避免误删后无法回退；前端确认卡需回传 confirm: "yes"。
+        for item in confirmed:
+            if not isinstance(item, dict) or str(item.get("name") or "") != "delete_trip":
+                continue
+            raw_args: Any = item.get("arguments") or {}
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except ValueError:
+                    raw_args = {}
+            if not isinstance(raw_args, dict):
+                raw_args = {}
+            yes = str(raw_args.get("confirm") or item.get("confirm") or "").strip().lower()
+            if yes not in ("yes", "y", "true", "1", "是"):
+                yield emit_event("error", {
+                    "code": ErrorCode.VALIDATION,
+                    "message": "删除行程属于危险操作，需要用户回答「是」二次确认（confirm: \"yes\"）后才可执行",
+                })
+                return
         for item in confirmed:
             if not isinstance(item, dict):
                 continue

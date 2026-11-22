@@ -4,10 +4,11 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db, require_permission
+from app.core.errors import AppError, ErrorCode
 from app.core.response import ok
 from app.schemas.common import dump, dump_many
 from app.schemas.plan import (
@@ -115,3 +116,42 @@ def plan_route(
     user=Depends(require_permission("trip:read")),
 ):
     return ok(plan_service.build_route(db, trip_id), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.get("/trips/{trip_id}/plan/categories")
+def plan_categories(
+    trip_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("trip:read")),
+):
+    """中文分类预设：返回 {id,label} 列表。"""
+    return ok(plan_service.list_categories(), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.get("/trips/{trip_id}/plan/conflicts")
+def plan_conflicts(
+    trip_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("trip:read")),
+):
+    """同一行程日内时间重叠列表（前项 end == 后项 start 不算冲突）。"""
+    return ok(plan_service.conflicts_for_trip(db, trip_id), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.post("/trips/{trip_id}/plan/auto-arrange")
+def plan_auto_arrange(
+    trip_id: str,
+    request: Request,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    """按当前顺序（或 AI 顺序）重排该天时间，保留时长、相邻无缝衔接。"""
+    day_id = payload.get("day_id") or payload.get("dayId")
+    if not day_id:
+        raise AppError(ErrorCode.VALIDATION, "请指定要自动排程的 day_id")
+    use_ai = bool(payload.get("use_ai") or payload.get("useAi"))
+    result = plan_service.auto_arrange(db, trip_id, str(day_id), use_ai=use_ai)
+    return ok(result, request_id=getattr(request.state, "request_id", ""))

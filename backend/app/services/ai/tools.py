@@ -94,6 +94,83 @@ TOOL_DEFS: dict[str, dict[str, Any]] = {
         },
         "write": True, "permission": "booking:write",
     },
+    # ---- 全站只读工具：覆盖预订 / 交通 / 行李 / 瞬间 / 分享 / 天气 ----
+    "get_bookings": {
+        "description": "读取指定行程的预订（机票/酒店/门票等）记录（只读）",
+        "parameters": {"type": "object", "properties": {
+            "trip_id": {"type": "string"}, "limit": {"type": "integer"},
+        }, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
+    "get_transports": {
+        "description": "读取指定行程的交通段落（只读）",
+        "parameters": {"type": "object", "properties": {
+            "trip_id": {"type": "string"}, "limit": {"type": "integer"},
+        }, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
+    "get_packing": {
+        "description": "读取指定行程的行李清单及条目（只读）",
+        "parameters": {"type": "object", "properties": {
+            "trip_id": {"type": "string"},
+        }, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
+    "get_moments": {
+        "description": "读取当前用户可见的旅途瞬间（本人全部 + 他人公开的，只读）",
+        "parameters": {"type": "object", "properties": {
+            "trip_id": {"type": "string"}, "limit": {"type": "integer"},
+        }, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
+    "get_shares": {
+        "description": "读取指定行程的公开分享链接列表（不含 token，只读）",
+        "parameters": {"type": "object", "properties": {
+            "trip_id": {"type": "string"},
+        }, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
+    "get_weather": {
+        "description": "查询城市天气与出行建议（只读；未给 city 时用行程目的地）",
+        "parameters": {"type": "object", "properties": {
+            "city": {"type": "string"}, "days": {"type": "integer"},
+            "provider": {"type": "string"},
+        }, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
+    # ---- 全站写工具：均需前端二次确认 + 与人工相同的权限校验 ----
+    "delete_trip": {
+        "description": "删除（软删）当前行程，危险操作，需要用户回答是/否二次确认；权限 trip:settings",
+        "parameters": {"type": "object", "properties": {
+            "confirm": {"type": "string", "description": "用户二次确认，必须为 yes 才会执行"},
+            "trip_id": {"type": "string"},
+        }, "required": ["confirm"], "additionalProperties": False},
+        "write": True, "permission": "trip:settings",
+    },
+    "rearrange_plan_times": {
+        "description": "自动重排某一天计划项的时间以消除冲突（写操作，需前端确认，权限 plan:write）",
+        "parameters": {"type": "object", "properties": {
+            "day_id": {"type": "string"}, "use_ai": {"type": "boolean"},
+        }, "required": ["day_id"], "additionalProperties": False},
+        "write": True, "permission": "plan:write",
+    },
+    "set_moment_public": {
+        "description": "设置某条旅途瞬间是否对外公开（写操作，需前端确认，权限 moment:write）",
+        "parameters": {"type": "object", "properties": {
+            "moment_id": {"type": "string"}, "is_public": {"type": "boolean"},
+        }, "required": ["moment_id", "is_public"], "additionalProperties": False},
+        "write": True, "permission": "moment:write",
+    },
+    "create_expense": {
+        "description": "新增一条费用记录并自动分账（写操作，需前端确认，权限 expense:write）",
+        "parameters": {"type": "object", "properties": {
+            "amount": {"type": "number"}, "category": {"type": "string"},
+            "currency": {"type": "string"}, "note": {"type": "string"},
+            "paid_by": {"type": "string"}, "occurred_at": {"type": "string"},
+            "split_mode": {"type": "string"},
+        }, "required": ["amount"], "additionalProperties": True},
+        "write": True, "permission": "expense:write",
+    },
 }
 
 READ_TOOLS = tuple(name for name, spec in TOOL_DEFS.items() if not spec["write"])
@@ -167,6 +244,14 @@ def _coerce(model: Any, arguments: dict, extra: dict) -> dict:
             if isinstance(column.type, (String, Text)):
                 data[name] = ""
     return data
+
+
+def _limit_arg(args: dict, default: int = 100) -> int:
+    """安全解析工具参数里的 limit，避免非法值把对话打成 500。"""
+    try:
+        return max(1, min(int(args.get("limit") or default), 200))
+    except (TypeError, ValueError):
+        return default
 
 
 def _query(db, model, where: dict, limit: int) -> list[dict]:
@@ -325,6 +410,92 @@ class ToolRegistry:
             pois = search_poi(q, provider=args.get("provider"), city=str(args.get("city") or ""), cfg=self.cfg)
             return pois[:10]
 
+        # ------------------------------------------------ 全站只读工具
+        if name == "get_bookings":
+            from app.models.booking import Booking
+
+            return _query(db, Booking, {"trip_id": trip_id}, _limit_arg(args))
+
+        if name == "get_transports":
+            from app.models.transport import Transport
+
+            return _query(db, Transport, {"trip_id": trip_id}, _limit_arg(args))
+
+        if name == "get_packing":
+            from app.models.packing import PackingItem, PackingList
+
+            lists = (
+                db.query(PackingList)
+                .filter(PackingList.trip_id == trip_id)
+                .order_by(PackingList.sort_key)
+                .all()
+            )
+            out: list[dict] = []
+            for packing_list in lists:
+                items = (
+                    db.query(PackingItem)
+                    .filter(PackingItem.list_id == packing_list.id)
+                    .order_by(PackingItem.sort_key)
+                    .all()
+                )
+                out.append({
+                    "list": {"id": packing_list.id, "name": packing_list.name},
+                    "items": [
+                        {"id": item.id, "name": item.name,
+                         "qty": int(item.qty or 1), "checked": bool(item.checked),
+                         "assignee_id": item.assignee_id}
+                        for item in items
+                    ],
+                })
+            return out
+
+        if name == "get_moments":
+            from sqlalchemy import or_
+
+            from app.models.moment import Moment
+
+            viewer_id = getattr(self.user, "id", None)
+            query = db.query(Moment).filter(Moment.trip_id == trip_id)
+            if viewer_id:
+                query = query.filter(
+                    or_(Moment.author_id == viewer_id, Moment.is_public.is_(True))
+                )
+            else:
+                query = query.filter(Moment.is_public.is_(True))
+            return [
+                _row_dict(row)
+                for row in query.order_by(Moment.taken_at.desc()).limit(_limit_arg(args)).all()
+            ]
+
+        if name == "get_shares":
+            from app.services import share_service
+
+            return share_service.list_shares(db, trip_id) if trip_id else []
+
+        if name == "get_weather":
+            from app.services import weather_service
+
+            city = str(args.get("city") or "").strip()
+            if not city and trip_id:
+                from app.models.trip import Trip
+
+                trip = db.get(Trip, trip_id)
+                city = str(getattr(trip, "destination", None) or "").strip()
+            if not city:
+                raise AppError(ErrorCode.VALIDATION, "请提供城市名称或为行程设置目的地")
+            try:
+                return weather_service.fetch_weather(
+                    city,
+                    days=int(args.get("days") or 7),
+                    provider=args.get("provider") or None,
+                    db=db,
+                )
+            except AppError:
+                raise
+            except Exception as exc:  # noqa: BLE001  天气不可用降级为可读提示，不打断对话
+                return {"ok": False, "city": city,
+                        "message": f"天气服务暂不可用：{type(exc).__name__}"}
+
         if name == "add_plan_item":
             from app.models.plan import PlanItem
 
@@ -358,5 +529,70 @@ class ToolRegistry:
             db.add(booking)
             db.commit()
             return _row_dict(booking)
+
+        # ------------------------------------------------ 全站写工具（真实 DB 副作用）
+        if name == "delete_trip":
+            from datetime import datetime, timezone
+
+            from app.models.trip import Trip
+
+            confirm = str(args.get("confirm") or "").strip().lower()
+            if confirm not in ("yes", "y", "true", "1", "是"):
+                raise AppError(
+                    ErrorCode.VALIDATION,
+                    "删除行程需要用户回答是/否二次确认（confirm 必须为 yes）",
+                )
+            target = str(args.get("trip_id") or self.trip_id or "")
+            if not target:
+                raise AppError(ErrorCode.VALIDATION, "缺少行程上下文，无法删除行程")
+            if self.trip_id and target != self.trip_id:
+                raise AppError(ErrorCode.FORBIDDEN, "不允许删除当前上下文之外的行程")
+            trip = db.get(Trip, target)
+            if trip is None:
+                raise AppError(ErrorCode.NOT_FOUND, "行程不存在")
+            trip.deleted_at = datetime.now(timezone.utc)
+            db.commit()
+            return {"id": target, "deleted": True, "title": trip.title}
+
+        if name == "rearrange_plan_times":
+            from app.services import plan_service
+
+            day_id = str(args.get("day_id") or "") or None
+            return plan_service.auto_arrange(
+                db, trip_id, day_id, use_ai=bool(args.get("use_ai"))
+            )
+
+        if name == "set_moment_public":
+            from app.models.moment import Moment
+
+            moment = db.get(Moment, str(args.get("moment_id") or ""))
+            if moment is None or (trip_id and moment.trip_id != trip_id):
+                raise AppError(ErrorCode.NOT_FOUND, "瞬间记录不存在")
+            moment.is_public = bool(args.get("is_public"))
+            db.commit()
+            return _row_dict(moment)
+
+        if name == "create_expense":
+            from app.models.expense import Expense
+            from app.models.trip import Trip
+            from app.services import expense_service
+
+            if args.get("amount") is None:
+                raise AppError(ErrorCode.VALIDATION, "费用金额不能为空")
+            data = _coerce(Expense, args, {"trip_id": trip_id, "id": new_id()})
+            expense = Expense(**data)
+            db.add(expense)
+            db.flush()
+            trip = db.get(Trip, trip_id) if trip_id else None
+            if trip is not None:
+                # 复用人工侧同一套分账逻辑，保证金额与明细自洽
+                try:
+                    expense_service.normalize_split(expense, trip)
+                except AppError:
+                    raise
+                except Exception:  # noqa: BLE001  分账异常不阻断费用落库
+                    pass
+            db.commit()
+            return _row_dict(expense)
 
         raise AppError(ErrorCode.VALIDATION, f"工具 {name} 未实现")

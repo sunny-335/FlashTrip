@@ -22,6 +22,7 @@ from app.schemas.trip import (
     TripDayUpdate,
     TripOut,
     TripUpdate,
+    normalize_people,
 )
 
 router = APIRouter(tags=["trips"])
@@ -66,7 +67,11 @@ def create_trip(
     db: Session = Depends(get_db),
     user=Depends(require_permission("trip:settings")),
 ):
-    trip = Trip(id=new_id(), owner_id=user.id, **payload.model_dump())
+    # 出行人群校验：人数 >= 1、儿童数约束、未带儿童时强制归零
+    data = payload.model_dump()
+    tc, cc = normalize_people(data["traveler_count"], data["has_children"], data["children_count"])
+    data["traveler_count"], data["children_count"] = tc, cc
+    trip = Trip(id=new_id(), owner_id=user.id, **data)
     db.add(trip)
     db.commit()
     return ok(dump(TripOut, trip), request_id=getattr(request.state, "request_id", ""))
@@ -94,7 +99,16 @@ def update_trip(
     user=Depends(require_permission("trip:settings")),
 ):
     trip = _trip_or_404(db, trip_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    # 用「合并后的最终值」校验，保证局部更新也满足人数/儿童数约束
+    tc, cc = normalize_people(
+        changes.get("traveler_count", trip.traveler_count),
+        changes.get("has_children", trip.has_children),
+        changes.get("children_count", trip.children_count),
+    )
+    changes["traveler_count"] = tc
+    changes["children_count"] = cc
+    for key, value in changes.items():
         setattr(trip, key, value)
     db.commit()
     return ok(dump(TripOut, trip), request_id=getattr(request.state, "request_id", ""))
@@ -165,6 +179,42 @@ def trip_overview(
             "planned_count": planned,
             "unplanned_count": len(items) - planned,
             "geocoded_count": geo,
+        },
+        request_id=getattr(request.state, "request_id", ""),
+    )
+
+
+@router.get("/trips/{trip_id}/plan/options")
+def plan_options(
+    trip_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("trip:read")),
+):
+    """供预订 / 交通 / 费用下拉选择：行程日 + 计划项（只读）。"""
+    _trip_or_404(db, trip_id)
+    days = (
+        db.query(TripDay)
+        .filter(TripDay.trip_id == trip_id)
+        .order_by(TripDay.sort_key, TripDay.day_index)
+        .all()
+    )
+    items = db.query(PlanItem).filter(PlanItem.trip_id == trip_id).all()
+    return ok(
+        {
+            "days": [
+                {
+                    "id": d.id,
+                    "day_index": d.day_index,
+                    "date": d.date.isoformat() if d.date else None,
+                    "title": d.title,
+                }
+                for d in days
+            ],
+            "items": [
+                {"id": i.id, "title": i.title, "type": i.type, "day_id": i.day_id}
+                for i in items
+            ],
         },
         request_id=getattr(request.state, "request_id", ""),
     )

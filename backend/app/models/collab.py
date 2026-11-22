@@ -28,6 +28,9 @@ class TripMember(Base, TimestampMixin, SoftDeleteMixin):
     role: Mapped[str] = mapped_column(String(24), nullable=False, default="member")
     invited_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 受邀成员的可选联系方式（未绑定 User 时也可用于邮件提醒）
+    nickname: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class Permission(Base, TimestampMixin, SoftDeleteMixin):
@@ -61,3 +64,5 @@ class Invitation(Base, TimestampMixin, SoftDeleteMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 邀请激活后是否强制首次设密（与管理员强制改密策略配合）
+    force_reset: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

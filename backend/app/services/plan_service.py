@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import text
@@ -158,7 +158,9 @@ def create_item(db: Session, trip_id: str, payload: PlanItemCreate, user_id: str
     if payload.day_id is not None:
         _day_or_404(db, trip_id, payload.day_id)
     sort_key = payload.sort_key or next_sort_key(db, trip_id, payload.day_id, payload.bucket)
-    item = PlanItem(id=new_id(), trip_id=trip_id, created_by=user_id, **_item_data(payload, sort_key))
+    # 写库前统一让 start_time / end_time / duration_min 三者自洽
+    data = normalize_times(_item_data(payload, sort_key))
+    item = PlanItem(id=new_id(), trip_id=trip_id, created_by=user_id, **data)
     db.add(item)
     db.commit()
     return item
@@ -166,12 +168,36 @@ def create_item(db: Session, trip_id: str, payload: PlanItemCreate, user_id: str
 
 def update_item(db: Session, trip_id: str, item_id: str, payload: PlanItemUpdate) -> PlanItem:
     item = _item_or_404(db, trip_id, item_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    incoming = payload.model_dump(exclude_unset=True)
+    for key, value in incoming.items():
         if key == "day_id" and value is not None:
             _day_or_404(db, trip_id, value)
         if key == "sort_key" and not value:
             continue
         setattr(item, key, value)
+
+    # 时间三字段基于「合并后的值」重算：只提交 duration_min 时按新时长顺延 end_time，
+    # 显式提交 end_time 时以其为准反推 duration_min，避免旧 end 覆盖本次意图。
+    time_keys = ("start_time", "end_time", "duration_min")
+    if any(key in incoming for key in time_keys):
+        old_duration = item.duration_min
+        if old_duration is None and item.start_time and item.end_time:
+            old_start, old_end = _parse_time(item.start_time), _parse_time(item.end_time)
+            if old_start and old_end and old_end >= old_start:
+                old_duration = int((old_end - old_start).total_seconds() // 60)
+        merged: dict[str, Any] = {
+            "start_time": incoming.get("start_time", item.start_time),
+        }
+        if "end_time" in incoming:
+            merged["end_time"] = incoming["end_time"]
+        if "duration_min" in incoming:
+            merged["duration_min"] = incoming["duration_min"]
+        elif "end_time" not in incoming and old_duration is not None:
+            merged["duration_min"] = old_duration
+        norm = normalize_times(merged)
+        item.start_time = norm.get("start_time", item.start_time)
+        item.end_time = norm.get("end_time", item.end_time)
+        item.duration_min = norm.get("duration_min", item.duration_min)
     db.commit()
     return item
 
@@ -295,3 +321,266 @@ def undo_moves(
         db.rollback()
         raise
     return {"batch_id": batch_id, "restored": restored}
+
+
+# ---------------------------------------------------------------- 分类预设 / 时间联动 / 冲突 / 自动排程
+
+# 中文分类预设，供 GET /trips/{trip_id}/plan/categories 返回 {id,label}
+PLAN_CATEGORIES = ("景点", "餐饮", "住宿", "交通", "购物", "娱乐", "休闲", "其他")
+
+
+def list_categories() -> list[dict]:
+    return [{"id": name, "label": name} for name in PLAN_CATEGORIES]
+
+
+def _parse_time(value: Any) -> datetime | None:
+    """把 datetime / ISO 字符串统一为 naive datetime（避免 aware/naive 相减报错）。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        raise AppError(ErrorCode.VALIDATION, "时间格式不合法，请使用 ISO 8601") from None
+    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+
+def _parse_duration(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        raise AppError(ErrorCode.VALIDATION, "时长须为整数分钟") from None
+    if minutes < 0:
+        raise AppError(ErrorCode.VALIDATION, "时长不能为负数")
+    return minutes
+
+
+def normalize_times(data: dict) -> dict:
+    """让 start_time / end_time / duration_min 三者保持自洽。
+
+    - 给了 start + duration：自动算 end；
+    - 给了 start + end：以 end 为准反推 / 校验 duration；
+    - 给了 end + duration：反推 start。
+    三者齐全时 end_time 优先（HTTP 请求里它是最直观的字段）。
+    """
+    out = dict(data or {})
+    start = _parse_time(out.get("start_time"))
+    end = _parse_time(out.get("end_time"))
+    duration = _parse_duration(out.get("duration_min"))
+
+    has_start = start is not None
+    has_end = end is not None
+    has_duration = duration is not None
+    if has_start and has_end:
+        seconds = (end - start).total_seconds()
+        if seconds < 0:
+            raise AppError(ErrorCode.VALIDATION, "结束时间不能早于开始时间")
+        duration = int(seconds // 60)  # end 权威：反推并校验 duration
+        has_duration = True
+    elif has_start and has_duration:
+        end = start + timedelta(minutes=duration)
+        has_end = True
+    elif has_end and has_duration:
+        start = end - timedelta(minutes=duration)
+        has_start = True
+
+    for key, value, present in (
+        ("start_time", start, has_start),
+        ("end_time", end, has_end),
+        ("duration_min", duration, has_duration),
+    ):
+        if present or key in out:
+            out[key] = value
+    return out
+
+
+def _item_field(item: Any, name: str) -> Any:
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def detect_conflicts(items: list) -> list[dict]:
+    """同一 day_id 内按 start_time 排序检测重叠。
+
+    严格 prev_end > next_start 才算冲突（前项 end == 后项 start 视为无缝衔接）；
+    返回 [{item_id, with_item_id, start, end, reason}]，start/end 为重叠区间 ISO 串。
+    无 start/end 或 end <= start 的条目不参与。
+    """
+    groups: dict[str, list[dict]] = {}
+    for item in items or []:
+        start = _parse_time(_item_field(item, "start_time"))
+        end = _parse_time(_item_field(item, "end_time"))
+        if start is None or end is None or end <= start:
+            continue
+        key = str(_item_field(item, "day_id") or "")
+        groups.setdefault(key, []).append({
+            "item_id": str(_item_field(item, "id") or ""),
+            "title": str(_item_field(item, "title") or ""),
+            "start": start,
+            "end": end,
+        })
+
+    conflicts: list[dict] = []
+    for rows in groups.values():
+        rows.sort(key=lambda r: (r["start"], r["item_id"]))
+        active: dict | None = None  # 结束时间最晚的前项
+        for row in rows:
+            if active is None:
+                active = row
+                continue
+            if active["end"] > row["start"]:
+                conflicts.append({
+                    "item_id": row["item_id"],
+                    "with_item_id": active["item_id"],
+                    "start": row["start"].isoformat(),
+                    "end": min(active["end"], row["end"]).isoformat(),
+                    "reason": f"与「{active['title'] or active['item_id']}」时间重叠",
+                })
+            # 保留结束最晚者，避免长时段条目覆盖多个后续条目时漏报
+            if row["end"] > active["end"]:
+                active = row
+    return conflicts
+
+
+def conflicts_for_trip(db: Session, trip_id: str) -> list[dict]:
+    """读取整个行程的已排条目并返回冲突列表（供 GET /plan/conflicts）。"""
+    _trip_or_404(db, trip_id)
+    rows = (
+        db.query(PlanItem)
+        .filter(PlanItem.trip_id == trip_id)
+        .order_by(PlanItem.day_id, PlanItem.sort_key)
+        .all()
+    )
+    return detect_conflicts(rows)
+
+
+def _arrange_anchor(db: Session, day_id: str | None, rows: list[PlanItem]) -> datetime:
+    """取该天最早的 start_time 作为锚点；都没有时用行程日日期（或今天）的 09:00。"""
+    starts = [_parse_time(row.start_time) for row in rows]
+    starts = [value for value in starts if value is not None]
+    if starts:
+        return min(starts)
+    day = db.get(TripDay, day_id) if day_id else None
+    raw_date = getattr(day, "date", None) if day is not None else None
+    if isinstance(raw_date, datetime):
+        base = raw_date.replace(hour=9, minute=0, second=0, microsecond=0)
+    elif raw_date is not None and hasattr(raw_date, "year"):
+        base = datetime(raw_date.year, raw_date.month, raw_date.day, 9, 0, 0)
+    else:
+        base = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    return base.replace(tzinfo=None) if base.tzinfo else base
+
+
+def _ai_order(db: Session, rows: list[PlanItem]) -> list[str] | None:
+    """调 LLMGateway 生成更合理的顺序；任何异常/非法输出都返回 None 交由调用方降级。"""
+    if len(rows) < 2:
+        return None
+    try:
+        import json
+
+        from app.services.ai.gateway import LLMGateway
+
+        ids = [row.id for row in rows]
+        brief = [
+            {"id": row.id, "title": row.title, "type": row.type,
+             "category": row.category, "duration_min": row.duration_min}
+            for row in rows
+        ]
+        prompt = (
+            "你是行程规划助手。根据以下条目的类型、标题与时长，给出更合理的游览顺序。"
+            "只输出一个 JSON 数组，元素是这些 id 的一个排列，不要输出其它文字。\n"
+            + json.dumps(brief, ensure_ascii=False, default=str)
+        )
+        events = LLMGateway(db=db).chat(
+            [{"role": "system", "content": "只输出 JSON 数组，不要解释。"},
+             {"role": "user", "content": prompt}],
+            stream=False,
+        )
+        text = ""
+        for event in events:
+            for line in str(event).splitlines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    payload = json.loads(line[5:].strip())
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(payload, dict) and payload.get("content"):
+                    text = str(payload["content"])
+        left, right = text.find("["), text.rfind("]")
+        if left < 0 or right <= left:
+            return None
+        order = json.loads(text[left:right + 1])
+        if not isinstance(order, list):
+            return None
+        cleaned = [str(value) for value in order if str(value) in ids]
+        if len(cleaned) != len(ids) or set(cleaned) != set(ids):
+            return None
+        return cleaned
+    except Exception:  # noqa: BLE001  AI 不可用必须静默降级，绝不影响排程
+        return None
+
+
+def auto_arrange(db: Session, trip_id: str, day_id: str | None, *, use_ai: bool = False) -> dict:
+    """把该天条目按当前顺序（或 AI 顺序）重排时间：保留时长、相邻无缝衔接、消除冲突。
+
+    use_ai=True 时调 LLMGateway 生成更合理顺序；失败自动降级为顺序重排，不抛异常。
+    """
+    _trip_or_404(db, trip_id)
+    if day_id is not None:
+        _day_or_404(db, trip_id, day_id)
+    rows = (
+        db.query(PlanItem)
+        .filter(PlanItem.trip_id == trip_id, PlanItem.day_id == day_id)
+        .order_by(PlanItem.sort_key)
+        .all()
+    )
+    if not rows:
+        return {"arranged": 0, "dayId": day_id, "useAi": bool(use_ai),
+                "aiApplied": False, "conflicts": 0, "items": []}
+
+    order = list(rows)
+    ai_applied = False
+    if use_ai:
+        ai_ids = _ai_order(db, rows)
+        if ai_ids:
+            by_id = {row.id: row for row in rows}
+            order = [by_id[item_id] for item_id in ai_ids]
+            ai_applied = True
+
+    cursor = _arrange_anchor(db, day_id, rows)
+    for item in order:
+        minutes = item.duration_min
+        if minutes is None:
+            start, end = _parse_time(item.start_time), _parse_time(item.end_time)
+            if start and end and end >= start:
+                minutes = int((end - start).total_seconds() // 60)
+        try:
+            minutes = int(minutes or 0)
+        except (TypeError, ValueError):
+            minutes = 0
+        if minutes <= 0:
+            minutes = 60  # 无时长信息时给一个可读的默认时长
+        item.start_time = cursor
+        item.end_time = cursor + timedelta(minutes=minutes)
+        item.duration_min = minutes
+        cursor = item.end_time
+    db.commit()
+    return {
+        "arranged": len(order),
+        "dayId": day_id,
+        "useAi": bool(use_ai),
+        "aiApplied": ai_applied,
+        "conflicts": len(detect_conflicts(order)),
+        "items": [
+            {
+                "id": row.id,
+                "start_time": row.start_time.isoformat() if isinstance(row.start_time, datetime) else "",
+                "end_time": row.end_time.isoformat() if isinstance(row.end_time, datetime) else "",
+                "duration_min": row.duration_min,
+            }
+            for row in order
+        ],
+    }

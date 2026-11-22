@@ -84,6 +84,9 @@ class UserPreferences(Base, TimestampMixin, SoftDeleteMixin):
 
     user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     current_trip_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 主题保持 String 存储，值域固定为 light / dark / system（跟随系统）
     theme: Mapped[str] = mapped_column(String(16), nullable=False, default="light")
     default_map_provider_id: Mapped[str] = mapped_column(String(64), nullable=False, default="openfreemap")
     ai_tools_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 新建旅途瞬间是否默认公开（仅影响公开分享可见性，不改变私有属性）
+    moment_default_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

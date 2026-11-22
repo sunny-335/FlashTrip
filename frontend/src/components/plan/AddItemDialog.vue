@@ -1,5 +1,8 @@
 <script setup lang="ts">
-/** 新增条目对话框：字段对齐 PlanItemCreate；sort_key 由前端 keyBetween 追加到目标分组末尾。 */
+/** 新增条目对话框：字段对齐 PlanItemCreate；sort_key 由前端 keyBetween 追加到目标分组末尾。
+ *  分类改为下拉，选项来自 GET /plan/categories 的 8 个中文预设（失败时 store 已给本地兜底）；
+ *  开始 / 时长 / 结束交给 TimeField 联动，时长统一显示 2h10m，日期用所属行程日的 date 拼 ISO。
+ */
 import { computed, reactive, ref, watch } from 'vue'
 import { Loader2 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
@@ -8,7 +11,9 @@ import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import Dialog from '@/components/ui/Dialog.vue'
+import TimeField from './TimeField.vue'
 import { POOL_KEY, usePlanContext } from '@/composables/usePlanDnd'
+import { usePlanStore } from '@/stores/plan'
 import type { PlanItemCreate, PlanType } from '@/stores/plan'
 
 const props = withDefaults(
@@ -17,18 +22,21 @@ const props = withDefaults(
 )
 const open = defineModel<boolean>({ default: false })
 const { dnd } = usePlanContext()
+const plan = usePlanStore()
 
 const form = reactive({
-  type: 'place',
+  type: 'place' as string,
   title: '',
   subtitle: '',
   address: '',
   category: '',
-  start_time: '',
-  duration_min: '',
-  note: '',
   day_id: '',
+  note: '',
+  startTime: null as string | null,
+  endTime: null as string | null,
+  durationMin: null as number | null,
 })
+const timeKey = ref(0)
 const saving = ref(false)
 const error = ref('')
 
@@ -41,8 +49,27 @@ const typeOptions = [
 ]
 const dayOptions = computed(() => [
   { value: '', label: '待规划池' },
-  ...dnd.days.value.map((d) => ({ value: d.id, label: `Day ${d.day_index}` })),
+  ...dnd.days.value.map((d) => ({
+    value: d.id,
+    label: `第 ${d.day_index} 天${d.date ? ` · ${d.date}` : ''}`,
+  })),
 ])
+
+/** 分类下拉：8 个中文预设 + 「其他」兜底 + 「未分类」；旧值不在预设里时也保留一个同名选项。 */
+const categoryOptions = computed(() => {
+  const list = plan.categories.map((c) => ({ value: c.id, label: c.label }))
+  if (!list.some((o) => o.value === '其他')) list.push({ value: '其他', label: '其他' })
+  if (form.category && !list.some((o) => o.value === form.category)) {
+    list.unshift({ value: form.category, label: form.category })
+  }
+  return [{ value: '', label: '未分类' }, ...list]
+})
+
+/** 时间 ISO 用所属行程日的 date 拼接；待规划池没有日期时由后端 normalize_times 兜底。 */
+const dayDate = computed(() => {
+  if (!form.day_id) return null
+  return dnd.days.value.find((d) => d.id === form.day_id)?.date ?? null
+})
 
 watch(open, (v) => {
   if (!v) return
@@ -52,9 +79,11 @@ watch(open, (v) => {
   form.subtitle = ''
   form.address = ''
   form.category = ''
-  form.start_time = ''
-  form.duration_min = ''
   form.note = ''
+  form.startTime = null
+  form.endTime = null
+  form.durationMin = null
+  timeKey.value += 1
   error.value = ''
 })
 
@@ -88,9 +117,10 @@ async function submit() {
     title: form.title.trim(),
     subtitle: form.subtitle.trim() || null,
     address: form.address.trim() || null,
-    category: form.category.trim() || null,
-    start_time: form.start_time || null,
-    duration_min: form.duration_min ? Number(form.duration_min) : null,
+    category: form.category || null,
+    start_time: form.startTime,
+    end_time: form.endTime,
+    duration_min: form.durationMin,
     note: form.note.trim() || null,
     source: 'manual',
     sort_key: sortKey,
@@ -131,19 +161,19 @@ async function submit() {
         <label class="text-xs font-medium">地址</label>
         <Input v-model="form.address" placeholder="可选" />
       </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div class="space-y-1.5">
-          <label class="text-xs font-medium">分类</label>
-          <Input v-model="form.category" placeholder="例如：景点" />
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-xs font-medium">时长（分钟）</label>
-          <Input v-model="form.duration_min" type="number" placeholder="可选" />
-        </div>
+      <div class="space-y-1.5">
+        <label class="text-xs font-medium">分类</label>
+        <Select v-model="form.category" :options="categoryOptions" />
       </div>
       <div class="space-y-1.5">
-        <label class="text-xs font-medium">开始时间</label>
-        <Input v-model="form.start_time" type="datetime-local" />
+        <label class="text-xs font-medium">开始 / 时长 / 结束</label>
+        <TimeField
+          :key="timeKey"
+          v-model:startTime="form.startTime"
+          v-model:endTime="form.endTime"
+          v-model:durationMin="form.durationMin"
+          :date="dayDate"
+        />
       </div>
       <div class="space-y-1.5">
         <label class="text-xs font-medium">备注</label>

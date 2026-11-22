@@ -11,7 +11,6 @@ from app.services.map.coord import (
     transform,
 )
 from app.services.map.provider_registry import (
-    COMPLIANCE_NOTE,
     PROVIDER_DEFS,
     build_raster_style,
     get_provider_key,
@@ -23,6 +22,6 @@ from app.services.map.poi_adapter import geocode, get_poi, search_poi
 __all__ = [
     "COORD_SYSTEMS", "transform", "to_wgs84", "from_wgs84",
     "PROVIDER_DEFS", "list_providers", "build_raster_style",
-    "get_provider_key", "map_config", "COMPLIANCE_NOTE",
+    "get_provider_key", "map_config",
     "search_poi", "get_poi", "geocode",
 ]

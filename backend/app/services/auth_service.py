@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError, ErrorCode
 from app.core.security import create_access_token, hash_password, new_id, verify_password
 from app.models.user import User
+from app.services.password_policy import validate_password
 
 
 def find_by_account(db: Session, account: str) -> User | None:
@@ -56,6 +57,8 @@ def create_user(
     must_set_password: bool = False,
 ) -> User:
     """创建用户（不提交，交由调用方在同一事务内 commit）。"""
+    # 全站统一密码策略；owner 属于管理员，强制四类字符
+    validate_password(password, is_admin=(role == "owner"))
     if find_by_account(db, username) is not None:
         raise AppError(ErrorCode.CONFLICT, "账号已存在")
     now = datetime.now(timezone.utc)
@@ -80,6 +83,7 @@ def set_initial_password(db: Session, user: User, new_password: str) -> User:
     """邀请成员首次设密：完成后清除 must_set_password。"""
     if not user.must_set_password:
         raise AppError(ErrorCode.VALIDATION, "密码已设置，请使用修改密码接口")
+    validate_password(new_password)
     user.password_hash = hash_password(new_password)
     user.must_set_password = False
     user.password_set_at = datetime.now(timezone.utc)
@@ -90,6 +94,7 @@ def set_initial_password(db: Session, user: User, new_password: str) -> User:
 def change_password(db: Session, user: User, old_password: str, new_password: str) -> User:
     if not verify_password(user.password_hash, old_password):
         raise AppError(ErrorCode.UNAUTHORIZED, "原密码错误")
+    validate_password(new_password)
     user.password_hash = hash_password(new_password)
     user.password_set_at = datetime.now(timezone.utc)
     db.commit()

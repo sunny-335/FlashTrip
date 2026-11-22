@@ -1,21 +1,26 @@
 <script setup lang="ts">
 /** 地图主容器：MapLibre GL 统一渲染引擎。
- *  - 底图来自 /map/providers（脱敏），raster 瓦片走后端 /map/tiles/... 代理，前端 style 不含密钥；
+ *  - 唯一底图来源：/map/config 的 defaultProviderId（在全局设置里配置），行程页不再渲染底图下拉；
+ *  - 初始化：style 直接传给 new Map({style})，style.styleUrl 存在时用其 URL 字符串，
+ *    首次 style.load（load 事件）完成后才追加业务叠加层，避免空 style 上 addSource 报错；
  *  - plan items 坐标为 WGS84，落点 / 连线前按当前底图 coordSystem 用 fromWgs84() 反转换；
- *  - 切底图交给 useMapSwitch（快照相机 + 叠加层 + marker + 选中态 → setStyle → 重放 → 回滚）；
- *  - attribution 使用 MapLibre 原生控件常驻，并额外展示审图号与合规文案。
+ *  - 页脚只居中显示当前 provider 的 attribution，MapLibre 原生 attributionControl 保留；
+ *  - 底图无缝切换：useMapSwitch 快照相机 / source / layer / marker / 选中态 → setStyle →
+ *    style.load 后重放 → 按新坐标系重建 marker → 异常回滚 prevStyle，全程显示「切换中」。
  */
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import maplibregl from 'maplibre-gl'
 import type { Map as MlMap, Marker as MlMarker, StyleSpecification } from 'maplibre-gl'
 import { useRoute } from 'vue-router'
-import { Loader2, MapPin } from 'lucide-vue-next'
-import { COORD_LABELS, fromWgs84, type CoordSystem } from '@/lib/coord'
-import { useMapStore, normalizeCoord, styleForProvider } from '@/stores/map'
+import { Loader2 } from 'lucide-vue-next'
+import { fromWgs84, type CoordSystem } from '@/lib/coord'
+import {
+  useMapStore, normalizeCoord, styleForProvider, DEFAULT_VECTOR_STYLE_URL,
+  type MapStyleSpec,
+} from '@/stores/map'
 import { usePlanStore, type PlanItem } from '@/stores/plan'
 import { PLAN_CTX } from '@/composables/usePlanDnd'
-import MapProviderSwitcher from './MapProviderSwitcher.vue'
 import PoiSearchBox from './PoiSearchBox.vue'
 import { useMapSwitch, type AppliedStyle } from './useMapSwitch'
 import {
@@ -24,7 +29,7 @@ import {
   type OverlayMarker,
 } from './overlayRegistry'
 
-/** 兼容 PlanBoard 传入的 PlanItem[]，也接受 FootprintsView 的 moment 精简对象。 */
+/** 兼容 PlanBoard 传入的 PlanItem[]，也接受其他视图的精简坐标对象。 */
 interface MapItemLike {
   id: string
   lng?: number | null
@@ -51,19 +56,18 @@ let mapInstance: MlMap | null = null
 let domMarkers: MlMarker[] = []
 let markerEls: Record<string, HTMLElement> = {}
 let currentMarkers: OverlayMarker[] = []
+/** 当前已应用到画布的 provider id：避免 select() 回写时重复触发 watch 切换。 */
+let activeProviderId = ''
 
 const styleReady = ref(false)
 const initError = ref('')
 const notice = ref('')
-const switchRevision = ref(0)
 const applied = ref<AppliedStyle | null>(null)
 const selectedId = ref<string | null>(null)
 
-const coordLabel = computed(() => COORD_LABELS[normalizeCoord(mapStore.currentProvider?.coordSystem)] ?? 'WGS84')
-const attribution = computed(() => mapStore.currentProvider?.attribution ?? '© OpenStreetMap contributors')
-const auditNumber = computed(() => mapStore.auditNumber || mapStore.currentProvider?.auditNumber || '')
-const complianceNote = computed(
-  () => mapStore.complianceNote || mapStore.currentProvider?.complianceNote || '',
+/** 页脚署名：跟随当前 provider，切换底图时自动更新。 */
+const attribution = computed(
+  () => mapStore.currentProvider?.attribution ?? '© OpenStreetMap contributors',
 )
 
 function toOverlayMarkers(items: MapItemLike[] | undefined): OverlayMarker[] {
@@ -99,7 +103,7 @@ function applySelection(): void {
   }
 }
 
-/** DOM Marker 保守策略：全部 remove 后按新坐标系重建。 */
+/** DOM Marker 保守策略：全部 remove 后按新坐标系重建，坐标一律 WGS84 → 当前坐标系。 */
 function rebuildMarkers(list: OverlayMarker[], coord: CoordSystem): void {
   if (!mapInstance) return
   for (const mk of domMarkers) mk.remove()
@@ -112,6 +116,10 @@ function rebuildMarkers(list: OverlayMarker[], coord: CoordSystem): void {
     const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
       .setLngLat([x, y])
       .addTo(mapInstance)
+    // 供外层（如足迹页）捕获 marker 点击后按条目 id 进入行程记忆：只补 DOM 标识，不改渲染逻辑
+    const domEl = marker.getElement()
+    domEl.setAttribute('data-item-id', m.id)
+    domEl.setAttribute('title', m.title)
     el.addEventListener('click', (ev) => {
       ev.stopPropagation()
       selectedId.value = m.id
@@ -134,29 +142,29 @@ const switcher = useMapSwitch({
   getApplied: () => applied.value,
   onApplied: (target) => {
     applied.value = { style: target.style, coord: target.coord }
+    activeProviderId = target.providerId
     mapStore.select(target.providerId)
   },
 })
 
-// 顶层 ref：模板自动解包，避免深层访问 .value
+// 顶层 ref：模板自动解包
 const switching = switcher.switching
-const visibleCount = computed(() => toOverlayMarkers(props.items).length)
 
 watch(switching, (v) => { mapStore.switching = v })
 
-async function onSwitchProvider(id: string): Promise<void> {
+/** 运行期若默认底图被改动（如全局设置切换 provider），走快照/重放机制无缝切换，页脚随之更新。 */
+watch(() => mapStore.currentProviderId, async (id) => {
+  if (!id || !mapInstance || !styleReady.value || id === activeProviderId) return
   const p = mapStore.providers.find((x) => x.id === id)
-  if (!p || !p.enabled || !mapInstance) return
+  if (!p || !p.enabled) return
   const ok = await switcher.switchTo({
     providerId: p.id,
     style: styleForProvider(p),
     coord: normalizeCoord(p.coordSystem),
   })
-  // 无论成败都让下拉重建，失败时自动回显到仍生效的底图
-  switchRevision.value += 1
   if (!ok && switcher.error.value) initError.value = switcher.error.value
   else if (ok) initError.value = ''
-}
+})
 
 function onPoiAdded(item: PlanItem): void {
   try {
@@ -182,13 +190,16 @@ watch(() => props.items, syncItems)
 onMounted(async () => {
   await mapStore.load()
   if (!container.value) return
-  const provider = mapStore.currentProvider
-  // 列表为空时仍可渲染（用免 token 的 OpenFreeMap 兜底），attribution 常驻
-  const style = provider ? styleForProvider(provider) : 'https://tiles.openfreemap.org/styles/liberty'
+  // 行程页唯一底图：/map/config 的 defaultProviderId 对应的 provider
+  const provider = mapStore.defaultProvider ?? mapStore.currentProvider
+  const style: string | MapStyleSpec = provider ? styleForProvider(provider) : DEFAULT_VECTOR_STYLE_URL
   const coord: CoordSystem = provider ? normalizeCoord(provider.coordSystem) : 'WGS84'
+  activeProviderId = provider?.id ?? ''
   applied.value = { style, coord }
+  if (provider && mapStore.currentProviderId !== provider.id) mapStore.select(provider.id)
 
   try {
+    // style 必须直接传入构造参数：矢量 styleUrl 用 URL 字符串，raster 代理用 style 对象
     mapInstance = new maplibregl.Map({
       container: container.value,
       style: style as unknown as string | StyleSpecification,
@@ -197,6 +208,7 @@ onMounted(async () => {
       attributionControl: true,
     })
     mapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
+    // 首次 style.load 完成（MapLibre 的 load 事件）后再登记路线图层与 marker
     mapInstance.on('load', () => {
       if (!mapInstance) return
       styleReady.value = true
@@ -230,19 +242,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="relative h-full w-full overflow-hidden rounded-lg border border-border bg-muted/40">
+  <!-- h-full + 明确 min-h：容器高度链不断裂，canvas 不会被压成 0 高度 -->
+  <div class="relative h-full w-full min-h-[160px] overflow-hidden rounded-lg border border-border bg-muted/40">
     <div ref="container" class="absolute inset-0" />
 
-    <!-- 左上：底图切换 + POI 搜索 -->
-    <div v-if="showTools" class="absolute left-2 top-2 z-10 flex w-[248px] flex-col gap-2">
-      <MapProviderSwitcher
-        :key="switchRevision"
-        :model-value="mapStore.currentProviderId"
-        :providers="mapStore.providers"
-        :switching="switching"
-        :coord-label="coordLabel"
-        @change="onSwitchProvider"
-      />
+    <!-- 地图上方正中间：紧凑搜索框，结果以浮层下拉展示，不铺满遮挡地图 -->
+    <div v-if="showTools" class="absolute left-1/2 top-2 z-20 w-[min(92%,340px)] -translate-x-1/2">
       <PoiSearchBox
         v-if="tripId"
         :trip-id="tripId"
@@ -251,24 +256,17 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <!-- 左下：合规 / attribution 补充（原生 AttributionControl 常驻右下） -->
-    <div class="pointer-events-none absolute bottom-1 left-2 z-10 flex max-w-[70%] flex-col gap-0.5 text-[10px] leading-tight text-foreground/80">
-      <span class="w-fit rounded bg-card/85 px-1.5 py-0.5 shadow-sm">{{ attribution }}</span>
-      <span v-if="auditNumber" class="w-fit rounded bg-card/85 px-1.5 py-0.5 shadow-sm">审图号：{{ auditNumber }}</span>
-      <span v-if="complianceNote" class="line-clamp-2 w-fit rounded bg-card/85 px-1.5 py-0.5 shadow-sm text-muted-foreground">
-        {{ complianceNote }}
+    <!-- 页脚：只居中显示当前底图 provider 的署名，切换 provider 时自动跟随 -->
+    <div class="pointer-events-none absolute inset-x-0 bottom-1 z-10 flex justify-center px-2">
+      <span class="rounded bg-card/85 px-1.5 py-0.5 text-center text-[10px] leading-tight text-foreground/80 shadow-sm">
+        {{ attribution }}
       </span>
     </div>
 
-    <!-- 底部地点计数 -->
-    <div class="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-1 rounded bg-card/90 px-2 py-1 text-[10px] text-muted-foreground shadow-sm">
-      <MapPin class="h-3 w-3" /> {{ visibleCount }} 个地点 · {{ coordLabel }}
-    </div>
-
-    <p v-if="notice" class="absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs shadow-sm">
+    <p v-if="notice" class="absolute left-1/2 top-14 z-20 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs shadow-sm">
       {{ notice }}
     </p>
-    <p v-if="initError" class="absolute bottom-8 left-2 z-20 max-w-[80%] rounded-lg border border-destructive/40 bg-card px-2 py-1 text-[11px] text-destructive shadow-sm">
+    <p v-if="initError" class="absolute bottom-8 left-1/2 z-20 max-w-[80%] -translate-x-1/2 rounded-lg border border-destructive/40 bg-card px-2 py-1 text-[11px] text-destructive shadow-sm">
       {{ initError }}
     </p>
 

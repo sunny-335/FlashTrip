@@ -14,14 +14,18 @@ class LoginIn(BaseModel):
 
 
 class SetPasswordIn(BaseModel):
-    """邀请成员首次设密（凭邀请 token 登录后调用）。"""
+    """邀请成员首次设密（凭邀请 token 登录后调用）。
 
-    new_password: str = Field(min_length=8, max_length=256)
+    仅保留必填；强度口径统一由 password_policy.validate_password 在服务层判定，
+    避免 Pydantic 的 min_length=8 弱约束抢先给出与全局策略不一致的英文 422。
+    """
+
+    new_password: str
 
 
 class ChangePasswordIn(BaseModel):
     old_password: str = Field(min_length=1, max_length=256)
-    new_password: str = Field(min_length=8, max_length=256)
+    new_password: str
 
 
 class UserOut(ORMModel):

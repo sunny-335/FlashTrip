@@ -22,7 +22,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'moment:write': '编辑瞬间',
   'member:manage': '管理成员',
   'trip:settings': '行程设置',
-  'ai:use': '使用 AI',
+  'ai:use': '使用智能助手',
 }
 
 /** 默认只读权限。 */
@@ -44,6 +44,9 @@ export interface Member {
   role?: string
   joined_at?: string | null
   user?: MemberUser
+  /** 邀请时填写的昵称 / 邮箱，有则随成员返回。 */
+  nickname?: string | null
+  email?: string | null
   permissions: Record<string, boolean>
 }
 
@@ -60,6 +63,10 @@ export interface Invitation {
   revokedAt: string | null
   createdBy: string | null
   createdAt: string
+  /** 强制重置密码 / 受邀人昵称 / 邮箱。 */
+  forceReset?: boolean
+  nickname?: string | null
+  email?: string | null
 }
 
 export interface CreateInviteResult {
@@ -74,6 +81,28 @@ export interface CreateInviteIn {
   permission_keys: string[]
   expires_days?: number
   max_uses?: number
+  force_reset?: boolean
+  nickname?: string
+  email?: string
+}
+
+/** 分享链接：字段对齐 share_service._share_dict，创建时额外带 token / url。 */
+export interface ShareLink {
+  id: string
+  trip_id: string
+  title: string
+  include_transports: boolean
+  include_bookings: boolean
+  include_packing: boolean
+  include_expenses: boolean
+  include_moments: boolean
+  expires_at: string
+  revoked_at: string | null
+  created_by: string | null
+  view_count: number
+  created_at: string
+  token?: string
+  url?: string
 }
 
 export const useCollabStore = defineStore('collab', () => {
@@ -140,6 +169,9 @@ export const useCollabStore = defineStore('collab', () => {
       permission_keys: payload.permission_keys,
       expires_days: payload.expires_days ?? 7,
       max_uses: payload.max_uses ?? 1,
+      force_reset: Boolean(payload.force_reset),
+      nickname: payload.nickname?.trim() || undefined,
+      email: payload.email?.trim() || undefined,
     })
     invites.value = [result.invitation, ...invites.value]
     return result

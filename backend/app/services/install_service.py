@@ -45,9 +45,33 @@ from app.models.config import (
 )
 from app.models.user import User
 from app.services import auth_service
+from app.services.map.provider_registry import PROVIDER_DEFS, get_provider_key
+from app.services.password_policy import validate_password
 
 log = get_logger(__name__)
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+# 供应商配置里所有可能承载密钥的字段：脱敏时一律剔除，只回布尔标记
+_SECRET_FIELDS = ("key_enc", "api_key_enc", "token_enc", "key", "api_key", "token")
+
+
+def _cfg_providers(section: Any) -> list[dict]:
+    """把 ai/map 配置节里的 providers（list / dict / None）统一为字典列表。
+
+    字典形式 {id: {...}} 会补上 id；非字典元素直接丢弃，保证遍历不抛异常。
+    """
+    raw = section.get("providers") if isinstance(section, dict) else None
+    if isinstance(raw, dict):
+        result: list[dict] = []
+        for provider_id, value in raw.items():
+            if isinstance(value, dict):
+                item = dict(value)
+                item.setdefault("id", provider_id)
+                result.append(item)
+        return result
+    if isinstance(raw, list):
+        return [dict(p) for p in raw if isinstance(p, dict)]
+    return []
 
 
 # ---------------------------------------------------------------- 请求 DTO
@@ -67,6 +91,9 @@ class AiTestIn(BaseModel):
 
 
 class MapTestIn(BaseModel):
+    # 按预设 provider_id 取元数据做连通性检查；手填 URL 字段保留仅为兼容旧前端，
+    # 一律忽略（前端不再提交 Style URL / 瓦片模板）。
+    provider_id: str = ""
     style_url: str = ""
     tile_url_template: str = ""
     key: str = ""
@@ -74,7 +101,8 @@ class MapTestIn(BaseModel):
 
 class AdminIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=8, max_length=256)
+    # 必填即可；管理员密码的四类字符 / 8-32 位 / 连续串由 perform_install 统一校验
+    password: str = Field(min_length=1, max_length=256)
     email: str | None = None
     phone: str | None = None
     display_name: str = ""
@@ -93,16 +121,12 @@ class AiProviderIn(BaseModel):
 
 
 class MapProviderIn(BaseModel):
+    """设置页只提交业务字段；Style URL / 瓦片模板 / 坐标系 / 署名 / 审图号等
+    技术元数据一律由 provider_registry.PROVIDER_DEFS 自动带出，不再手填。"""
+
     id: str = Field(min_length=1, max_length=64)
-    key: str = ""
-    style_url: str = ""
-    tile_url_template: str = ""
-    default_style: str = ""
-    coord_system: str = "WGS84"
-    attribution: str = ""
-    audit_number: str = ""
+    key: str = ""  # 留空表示保留已有密文
     enabled: bool = True
-    needs_token: bool = False
 
 
 class InstallIn(BaseModel):
@@ -113,11 +137,38 @@ class InstallIn(BaseModel):
     admin: AdminIn
     ai_providers: list[AiProviderIn] = Field(default_factory=list)
     map_providers: list[MapProviderIn] = Field(default_factory=list)
-    map_default_provider_id: str = "openfreemap"
+    map_default_provider_id: str = "openfreemap-liberty"
     audit_number: str = ""
     ai_tools_enabled: bool = False
+    # 邮件通知：向导可配置也可跳过；跳过时只写 mail_skipped 标记。
+    # 字段与 mail_service._MAIL_DEFAULTS 一致，password 明文仅在内存中，落盘加密。
+    mail: dict | None = None
+    mail_skipped: bool = False
     # 可选自带主密钥；env FLASHTRIP_SECRET_KEY 优先级更高
     secret_key: str = ""
+
+
+class MailTestIn(BaseModel):
+    """向导/设置页「发送测试邮件」请求体；与 mail 段字段一致。"""
+
+    enabled: bool = True
+    host: str = ""
+    port: int = 465
+    user: str = ""
+    password: str = ""
+    from_addr: str = ""
+    from_name: str = "瞬旅 FlashTrip"
+    use_ssl: bool = True
+    use_tls: bool = False
+    timeout_s: int = 10
+    default_recipients: list[str] = Field(default_factory=list)
+
+
+def test_mail(payload: MailTestIn) -> dict:
+    """向导阶段试发邮件：不落盘配置，直接把表单覆盖值交给 mail_service。"""
+    from app.services import mail_service  # 局部导入，避免与配置模块形成循环依赖
+
+    return mail_service.test_mail(payload.model_dump())
 
 
 class ConfigUpdateIn(BaseModel):
@@ -128,6 +179,13 @@ class ConfigUpdateIn(BaseModel):
     map_default_provider_id: str | None = None
     audit_number: str | None = None
     ai_tools_enabled: bool | None = None
+    # 扩展配置段：由 settings.py 交给 N1 的 save_*_config 落盘；
+    # _merge_config 刻意忽略它们，避免把含密文的原始 dict 直接写进 config.json。
+    mail: dict | None = None
+    weather: dict | None = None
+    backup: dict | None = None
+    # 新建旅途瞬间是否默认公开（写 user_preferences，不进 config.json）
+    moment_default_public: bool | None = None
 
 
 class UnlockIn(BaseModel):
@@ -205,11 +263,43 @@ def test_ai(payload: AiTestIn) -> dict:
 
 
 def test_map(payload: MapTestIn) -> dict:
-    url = (payload.style_url or payload.tile_url_template).strip()
+    """按 provider_id 从预设取元数据做连通性检查，不再要求手填 Style URL。
+
+    手填的 style_url / tile_url_template 字段保留仅为兼容旧前端，一律忽略；
+    探测地址只能来自 PROVIDER_DEFS，避免把矢量底图误配成 raster 代理。
+    """
+    provider_id = (payload.provider_id or "").strip()
+    if not provider_id:
+        return {"ok": True, "skipped": True, "message": "未选择地图供应商，跳过探测"}
+    defn = next((d for d in PROVIDER_DEFS if d["id"] == provider_id), None)
+    if defn is None:
+        raise AppError(ErrorCode.MAP_PROVIDER_ERROR, f"未知地图供应商：{provider_id}")
+    # 只取 http(s) 地址：mapbox:// 是矢量样式伪协议，改走其瓦片模板
+    url = ""
+    for candidate in (defn.get("styleUrl"), defn.get("tileUrlTemplate")):
+        if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+            url = candidate.strip()
+            break
     if not url:
-        return {"ok": True, "skipped": True, "message": "未配置地图地址，跳过探测"}
-    if payload.key:
-        url = url.replace("{key}", payload.key).replace("{token}", payload.key)
+        return {"ok": True, "skipped": True, "message": "该供应商无可探测地址，跳过探测"}
+
+    # 密钥：请求体优先，否则复用已保存的密文；明文/密文绝不写入日志
+    key = payload.key
+    if not key and defn.get("needsToken"):
+        try:
+            key = get_provider_key(get_config_store().load(), provider_id)
+        except AppError:
+            key = ""
+    if any(token in url for token in ("{key}", "{token}", "{access_token}")) and not key:
+        return {"ok": True, "skipped": True, "message": "该供应商需要先配置密钥，跳过探测"}
+    url = (url.replace("{key}", key)
+              .replace("{token}", key)
+              .replace("{access_token}", key))
+    subs = defn.get("subdomains") or []
+    if "{s}" in url:
+        url = url.replace("{s}", str(subs[0]) if subs else "0")
+    # 用一组固定瓦片坐标展开占位符，仅用于连通性探测
+    url = url.replace("{z}", "0").replace("{x}", "0").replace("{y}", "0")
     try:
         resp = httpx.get(url, timeout=3.0, follow_redirects=True)
         if resp.status_code >= 400:
@@ -217,7 +307,7 @@ def test_map(payload: MapTestIn) -> dict:
         return {"ok": True, "status_code": resp.status_code}
     except AppError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  异常可能回显含密钥的 URL，只记录类型
         log.warning("wizard.map_test_failed", error=type(exc).__name__)
         raise AppError(ErrorCode.MAP_PROVIDER_ERROR, f"地图探测失败：{type(exc).__name__}") from exc
 
@@ -245,18 +335,43 @@ def wizard_status() -> dict:
 
 
 def read_config_sanitized() -> dict:
-    """脱敏配置：主密钥打码、所有 *_enc 替换为布尔标记，密文绝不出后端。"""
+    """脱敏配置：主密钥打码、所有密钥字段替换为布尔标记，密文/明文绝不出后端。
+
+    ai.providers / map.providers 为 list、dict、None 或配置节缺失时均安全处理。
+    """
     cfg = deepcopy(get_config_store().load())
     if "secret_key" in cfg:
         cfg["secret_key"] = "***"
-    for provider in (cfg.get("ai") or {}).get("providers", []) or []:
-        enc = provider.pop("api_key_enc", "")
-        provider.pop("api_key", None)
-        provider["has_api_key"] = bool(enc)
-    for provider in (cfg.get("map") or {}).get("providers", []) or []:
-        enc = provider.pop("key_enc", "")
-        provider.pop("key", None)
-        provider["has_key"] = bool(enc)
+    ai_section = cfg.get("ai")
+    ai_providers = _cfg_providers(ai_section)
+    for provider in ai_providers:
+        has_key = any(bool(provider.get(field)) for field in _SECRET_FIELDS)
+        for field in _SECRET_FIELDS:
+            provider.pop(field, None)
+        provider["has_api_key"] = has_key
+    if isinstance(ai_section, dict):
+        ai_section["providers"] = ai_providers
+    map_section = cfg.get("map")
+    map_providers = _cfg_providers(map_section)
+    for provider in map_providers:
+        has_key = any(bool(provider.get(field)) for field in _SECRET_FIELDS)
+        for field in _SECRET_FIELDS:
+            provider.pop(field, None)
+        provider["has_key"] = has_key
+    if isinstance(map_section, dict):
+        map_section["providers"] = map_providers
+    # mail / weather / backup 段可能含 password_enc / *_key_enc 密文，
+    # 一律替换为各 service 的脱敏摘要，密文绝不出后端。
+    try:
+        from app.services import backup_service, mail_service, weather_service
+
+        cfg["mail"] = mail_service.get_mail_config()
+        cfg["weather"] = weather_service.get_weather_config()
+        cfg["backup"] = backup_service.get_backup_config()
+    except Exception as exc:  # noqa: BLE001  摘要读取失败也要保证不泄露原始段
+        log.warning("wizard.extended_config_redact_failed", error=type(exc).__name__)
+        for section in ("mail", "weather", "backup"):
+            cfg.pop(section, None)
     return cfg
 
 
@@ -285,6 +400,11 @@ def _base_config(payload: InstallIn, secret_key: str) -> dict:
             "audit_number": payload.audit_number,
         },
         "security": {"ai_tools_enabled": payload.ai_tools_enabled},
+        # N1 的 mail / weather / backup service 均以 cfg.get(section, {}) 兜底，
+        # 安装时预置空段，保证首次读配置即可用、save_*_config 合并写入不报错。
+        "mail": {},
+        "weather": {},
+        "backup": {},
     }
 
 
@@ -303,34 +423,51 @@ def _build_config(payload: InstallIn, secret_key: str) -> dict:
         }
         for p in payload.ai_providers
     ]
+    # config.json 只存业务字段（id / 密钥 / 启用状态）；Style URL、瓦片模板、
+    # 坐标系、署名、审图号等元数据一律由 PROVIDER_DEFS 预设带出，不落盘手填值。
     cfg["map"]["providers"] = [
         {
             "id": p.id,
             "key_enc": encrypt(p.key) if p.key else "",
-            "style_url": p.style_url,
-            "tile_url_template": p.tile_url_template,
-            "default_style": p.default_style,
-            "coord_system": p.coord_system,
-            "attribution": p.attribution,
-            "audit_number": p.audit_number,
             "enabled": p.enabled,
-            "needs_token": p.needs_token,
         }
         for p in payload.map_providers
     ]
+    # 邮件通知：向导可配置也可跳过。跳过时保持空段（后续在设置页补齐）；
+    # 未跳过则按 mail_service 默认字段做纯内存合并，password 明文只在此处
+    # 经 encrypt() 转成 password_enc，绝不写日志、绝不返回前端。
+    if payload.mail and not payload.mail_skipped:
+        from app.services.mail_service import _MAIL_DEFAULTS  # 局部导入避免循环依赖
+
+        section: dict[str, Any] = dict(_MAIL_DEFAULTS)
+        section["default_recipients"] = list(_MAIL_DEFAULTS["default_recipients"])
+        for key, value in payload.mail.items():
+            if key == "password":
+                if str(value or ""):
+                    section["password_enc"] = encrypt(str(value))
+            elif key in section and key != "password_enc":
+                section[key] = value
+        cfg["mail"] = section
     return cfg
 
 
 def _sync_provider_tables(db: Session, cfg: dict) -> None:
-    """把 config.json 的供应商配置镜像到 DB（按 provider_id 幂等 upsert）。"""
-    for p in (cfg.get("ai") or {}).get("providers", []) or []:
+    """把 config.json 的供应商配置镜像到 DB（按 provider_id 幂等 upsert）。
+
+    地图供应商的技术元数据（styleUrl / 瓦片模板 / 坐标系 / 署名 / 审图号 /
+    needs_token）一律取自 PROVIDER_DEFS 预设，config 只提供密钥与启用状态。
+    """
+    for p in _cfg_providers(cfg.get("ai")):
+        provider_id = str(p.get("id") or "")
+        if not provider_id:
+            continue
         row = (
             db.query(AiProviderConfig)
-            .filter(AiProviderConfig.provider_id == p["id"])
+            .filter(AiProviderConfig.provider_id == provider_id)
             .first()
         )
         if row is None:
-            row = AiProviderConfig(provider_id=p["id"])
+            row = AiProviderConfig(provider_id=provider_id)
             db.add(row)
         row.base_url = p.get("base_url", "")
         row.api_key_enc = p.get("api_key_enc", "")
@@ -339,24 +476,29 @@ def _sync_provider_tables(db: Session, cfg: dict) -> None:
         row.priority = int(p.get("priority", 0))
         row.timeout_s = int(p.get("timeout_s", 60))
         row.supports_stream = True
-    for p in (cfg.get("map") or {}).get("providers", []) or []:
+    presets = {d["id"]: d for d in PROVIDER_DEFS}
+    for p in _cfg_providers(cfg.get("map")):
+        provider_id = str(p.get("id") or "")
+        if not provider_id:
+            continue
+        preset = presets.get(provider_id, {})
         row = (
             db.query(MapProviderConfig)
-            .filter(MapProviderConfig.provider_id == p["id"])
+            .filter(MapProviderConfig.provider_id == provider_id)
             .first()
         )
         if row is None:
-            row = MapProviderConfig(provider_id=p["id"])
+            row = MapProviderConfig(provider_id=provider_id)
             db.add(row)
         row.key_enc = p.get("key_enc", "")
-        row.style_url = p.get("style_url", "")
-        row.tile_url_template = p.get("tile_url_template", "")
-        row.default_style = p.get("default_style", "")
-        row.coord_system = p.get("coord_system", "WGS84")
-        row.attribution = p.get("attribution", "")
-        row.audit_number = p.get("audit_number", "")
+        row.style_url = preset.get("styleUrl") or ""
+        row.tile_url_template = preset.get("tileUrlTemplate") or ""
+        row.default_style = str(p.get("default_style") or p.get("defaultStyle") or "")
+        row.coord_system = preset.get("coordSystem") or "WGS84"
+        row.attribution = preset.get("attribution") or ""
+        row.audit_number = preset.get("auditNumber") or ""
         row.enabled = bool(p.get("enabled", True))
-        row.needs_token = bool(p.get("needs_token", False))
+        row.needs_token = bool(preset.get("needsToken", False))
 
 
 def _sync_preferences(db: Session, cfg: dict, *, admin_id: str | None = None) -> None:
@@ -441,8 +583,10 @@ def _validate_install(payload: InstallIn) -> None:
     """逐项校验向导输入；真实连通性只探测 DB（AI/地图/Redis 由独立 test-* 端点先行验证）。"""
     if not payload.database_url.strip():
         raise AppError(ErrorCode.VALIDATION, "数据库连接串不能为空")
-    if not payload.admin.username.strip() or len(payload.admin.password) < 8:
-        raise AppError(ErrorCode.VALIDATION, "管理员账号或密码不合法（密码至少 8 位）")
+    if not payload.admin.username.strip():
+        raise AppError(ErrorCode.VALIDATION, "管理员账号不能为空")
+    # 管理员密码：8-32 位、四类字符齐全、禁连续串（与普通用户口径不同）
+    validate_password(payload.admin.password, is_admin=True)
     seen: set[str] = set()
     for p in payload.ai_providers:
         if p.id in seen:
@@ -451,11 +595,13 @@ def _validate_install(payload: InstallIn) -> None:
         if p.enabled and not p.base_url.strip():
             raise AppError(ErrorCode.VALIDATION, f"AI 供应商 {p.id} 未配置 base_url")
     seen.clear()
+    needs_token_ids = {d["id"] for d in PROVIDER_DEFS if d.get("needsToken")}
     for p in payload.map_providers:
         if p.id in seen:
             raise AppError(ErrorCode.VALIDATION, f"地图供应商 id 重复：{p.id}")
         seen.add(p.id)
-        if p.needs_token and not p.key:
+        # 是否需要密钥由预设元数据判定，不再依赖前端传入
+        if p.id in needs_token_ids and not p.key:
             raise AppError(ErrorCode.VALIDATION, f"地图供应商 {p.id} 需要 token/key")
     test_database(DbTestIn(url=payload.database_url))
 
@@ -493,6 +639,9 @@ def perform_install(payload: InstallIn) -> dict:
     if store.is_installed() and not store.is_unlocked():
         raise AppError(ErrorCode.INSTALL_LOCKED, "系统已安装且未解锁，请先解锁后再重新配置")
     _validate_install(payload)
+    # 创建管理员（_seed_database -> auth_service.create_user(role="owner")）前，
+    # 显式按管理员口径再校验一次，杜绝任何绕过输入校验直接调用本函数的路径。
+    validate_password(payload.admin.password, is_admin=True)
 
     env_secret = get_settings().SECRET_KEY
     if env_secret:
@@ -591,11 +740,21 @@ def unlock(db: Session, payload: UnlockIn) -> dict:
 
 
 def _merge_config(cfg: dict, payload: ConfigUpdateIn) -> dict:
-    """合并更新；未重新提供明文 key 的供应商保留原有密文，避免误清密钥。"""
-    cfg.setdefault("redis", {})
-    cfg.setdefault("ai", {"providers": []})
-    cfg.setdefault("map", {"providers": [], "default_provider_id": "openfreemap", "audit_number": ""})
-    cfg.setdefault("security", {"ai_tools_enabled": False})
+    """合并更新；未重新提供明文 key 的供应商保留原有密文，避免误清密钥。
+
+    map_providers 按 id 增量合并：未提交的供应商原样保留，仅更新提交项的
+    key（非空时重新加密）与 enabled；技术元数据不写入 config，由预设带出。
+    """
+    # 配置节可能被写成 null / 非字典，统一兜底，避免后续下标赋值抛异常
+    defaults = {
+        "redis": {},
+        "ai": {"providers": []},
+        "map": {"providers": [], "default_provider_id": "openfreemap", "audit_number": ""},
+        "security": {"ai_tools_enabled": False},
+    }
+    for section, default in defaults.items():
+        if not isinstance(cfg.get(section), dict):
+            cfg[section] = dict(default)
 
     if payload.redis_url is not None:
         cfg["redis"]["url"] = payload.redis_url
@@ -609,7 +768,7 @@ def _merge_config(cfg: dict, payload: ConfigUpdateIn) -> dict:
         cfg["map"]["audit_number"] = payload.audit_number
 
     if payload.ai_providers is not None:
-        old = {p.get("id"): p for p in cfg["ai"].get("providers", []) or []}
+        old = {str(p.get("id")): p for p in _cfg_providers(cfg["ai"]) if p.get("id")}
         merged = []
         for p in payload.ai_providers:
             enc = encrypt(p.api_key) if p.api_key else (old.get(p.id, {}).get("api_key_enc", ""))
@@ -627,30 +786,29 @@ def _merge_config(cfg: dict, payload: ConfigUpdateIn) -> dict:
         cfg["ai"]["providers"] = merged
 
     if payload.map_providers is not None:
-        old = {p.get("id"): p for p in cfg["map"].get("providers", []) or []}
-        merged = []
+        # 以已有配置为底：未提交的条目原样保留，不会被整体替换掉
+        merged = {str(p.get("id")): dict(p) for p in _cfg_providers(cfg["map"]) if p.get("id")}
         for p in payload.map_providers:
-            enc = encrypt(p.key) if p.key else (old.get(p.id, {}).get("key_enc", ""))
-            merged.append(
-                {
-                    "id": p.id,
-                    "key_enc": enc,
-                    "style_url": p.style_url,
-                    "tile_url_template": p.tile_url_template,
-                    "default_style": p.default_style,
-                    "coord_system": p.coord_system,
-                    "attribution": p.attribution,
-                    "audit_number": p.audit_number,
-                    "enabled": p.enabled,
-                    "needs_token": p.needs_token,
-                }
-            )
-        cfg["map"]["providers"] = merged
+            entry = dict(merged.get(p.id, {"id": p.id}))
+            entry["id"] = p.id
+            if p.key:
+                entry["key_enc"] = encrypt(p.key)  # 非空才重新加密
+            else:
+                entry.setdefault("key_enc", "")  # 留空保留旧密文
+            entry["enabled"] = p.enabled
+            # 剥离历史手填的技术元数据，全部改由 PROVIDER_DEFS 预设带出
+            for field in (
+                "style_url", "tile_url_template", "coord_system",
+                "attribution", "audit_number", "needs_token",
+            ):
+                entry.pop(field, None)
+            merged[p.id] = entry
+        cfg["map"]["providers"] = list(merged.values())
     return cfg
 
 
 def update_config(db: Session, payload: ConfigUpdateIn) -> dict:
-    """PUT 配置：需要解锁（由 API 层校验），config.json 与 DB 同步。"""
+    """PUT 配置：config.json 与 DB 同步；是否需要解锁由各 API 端点自行决定。"""
     store = get_config_store()
     cfg = _merge_config(store.load(), payload)
     _sync_provider_tables(db, cfg)
@@ -669,6 +827,10 @@ def rotate_secret(db: Session) -> dict:
         )
     store = get_config_store()
     original = deepcopy(store.load())
+    # 归一化供应商结构：dict / None 统一为 list，保证明文列表与写回索引严格对应
+    for section in ("ai", "map"):
+        if isinstance(original.get(section), dict):
+            original[section]["providers"] = _cfg_providers(original[section])
 
     # ① 用旧密钥解出全部明文（只保留纯值，不再持有 ORM 对象）
     ai_plain = {
@@ -686,14 +848,10 @@ def rotate_secret(db: Session) -> dict:
         for r in db.query(AppConfig).filter(AppConfig.value_enc.isnot(None)).all()
         if r.value_enc
     }
-    cfg_ai_plain = [
-        decrypt(p.get("api_key_enc", ""))
-        for p in (original.get("ai") or {}).get("providers", []) or []
-    ]
-    cfg_map_plain = [
-        decrypt(p.get("key_enc", ""))
-        for p in (original.get("map") or {}).get("providers", []) or []
-    ]
+    ai_entries = _cfg_providers(original.get("ai"))
+    map_entries = _cfg_providers(original.get("map"))
+    cfg_ai_plain = [decrypt(p.get("api_key_enc", "")) for p in ai_entries]
+    cfg_map_plain = [decrypt(p.get("key_enc", "")) for p in map_entries]
     db.rollback()  # 结束只读事务，避免与 ConfigStore 独立连接争用 SQLite 写锁
 
     new_key = secrets.token_urlsafe(48)
@@ -713,11 +871,17 @@ def rotate_secret(db: Session) -> dict:
             if row.key in app_plain:
                 row.value_enc = encrypt(app_plain[row.key])
         db.commit()
-        # ④ 用新密钥重加密 config.json 中的供应商密文并写回
-        for i, provider in enumerate((new_cfg.get("ai") or {}).get("providers", []) or []):
+        # ④ 用新密钥重加密 config.json 中的供应商密文并写回（顺序与明文列表一致）
+        new_ai_entries = _cfg_providers(new_cfg.get("ai"))
+        for i, provider in enumerate(new_ai_entries):
             provider["api_key_enc"] = encrypt(cfg_ai_plain[i]) if cfg_ai_plain[i] else ""
-        for i, provider in enumerate((new_cfg.get("map") or {}).get("providers", []) or []):
+        if isinstance(new_cfg.get("ai"), dict):
+            new_cfg["ai"]["providers"] = new_ai_entries
+        new_map_entries = _cfg_providers(new_cfg.get("map"))
+        for i, provider in enumerate(new_map_entries):
             provider["key_enc"] = encrypt(cfg_map_plain[i]) if cfg_map_plain[i] else ""
+        if isinstance(new_cfg.get("map"), dict):
+            new_cfg["map"]["providers"] = new_map_entries
         store.save(new_cfg)
     except Exception as exc:  # noqa: BLE001
         db.rollback()

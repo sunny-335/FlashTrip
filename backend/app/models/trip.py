@@ -28,6 +28,12 @@ class Trip(Base, TimestampMixin, SoftDeleteMixin):
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Shanghai")
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default="CNY")
     visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="private")
+    # 出行人群 / 家庭模式（与 0004_extended 迁移逐列对齐）
+    traveler_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    has_children: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    children_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    family_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    family_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class TripDay(Base, TimestampMixin, SoftDeleteMixin):

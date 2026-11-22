@@ -24,6 +24,7 @@ dependencies = [
   "reportlab>=4.2,<5",
   "icalendar>=6,<7",
   "greenlet>=3.0,<4",
+  "pypinyin>=0.51",
 ]
 
 [project.optional-dependencies]

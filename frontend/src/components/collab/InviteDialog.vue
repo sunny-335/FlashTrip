@@ -1,5 +1,7 @@
 <script setup lang="ts">
-/** 创建邀请：渠道 + 目标 + 权限 + TTL + 次数；成功后展示一次性明文链接（DB 只存 hash）。 */
+/** 创建邀请：渠道 + 目标 + 权限 + 有效期 + 次数 + 强制改密 + 昵称 / 邮箱；
+ *  成功后展示一次性明文链接（服务端只保存哈希）。
+ */
 import { computed, ref, watch } from 'vue'
 import { Link2, Copy, Check, Loader2 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
@@ -16,6 +18,9 @@ const emit = defineEmits<{ created: [] }>()
 
 const channel = ref<'phone' | 'email' | 'username'>('username')
 const target = ref('')
+const forceReset = ref(false)
+const nickname = ref('')
+const email = ref('')
 const permissions = ref<Record<string, boolean>>({
   ...Object.fromEntries(PERMISSION_KEYS.map((k) => [k, DEFAULT_PERMISSION_KEYS.includes(k)])),
 })
@@ -33,8 +38,8 @@ const channelOptions = [
 ]
 const placeholders: Record<string, string> = {
   username: '对方的用户名',
-  email: 'name@example.com',
-  phone: '13800000000',
+  email: '对方的邮箱',
+  phone: '对方的手机号',
 }
 
 const inviteLink = computed(() => {
@@ -48,6 +53,9 @@ watch(open, (v) => {
     // 每次打开重置表单，避免上一轮的明文链接残留
     target.value = ''
     channel.value = 'username'
+    forceReset.value = false
+    nickname.value = ''
+    email.value = ''
     expiresDays.value = 7
     maxUses.value = 1
     permissions.value = Object.fromEntries(PERMISSION_KEYS.map((k) => [k, DEFAULT_PERMISSION_KEYS.includes(k)]))
@@ -69,6 +77,9 @@ async function submit() {
       permission_keys: keys.length ? keys : [...DEFAULT_PERMISSION_KEYS],
       expires_days: Number(expiresDays.value) || 7,
       max_uses: Number(maxUses.value) || 1,
+      force_reset: forceReset.value,
+      nickname: nickname.value.trim() || undefined,
+      email: email.value.trim() || undefined,
     })
     emit('created')
   } catch (e) {
@@ -103,6 +114,24 @@ async function copyLink() {
         <label class="text-xs font-medium">可用次数</label>
         <Input v-model="maxUses" type="number" min="1" max="100" />
       </div>
+
+      <div class="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+        <p class="text-xs font-medium">受邀人资料（可选）</p>
+        <div class="grid grid-cols-[110px_1fr] items-center gap-2">
+          <label class="text-xs text-muted-foreground">昵称</label>
+          <Input v-model="nickname" placeholder="例如：小明" />
+          <label class="text-xs text-muted-foreground">邮箱</label>
+          <Input v-model="email" type="email" placeholder="用于成员列表展示" />
+        </div>
+        <label class="flex min-h-9 items-center gap-2 rounded-lg border border-border bg-card px-3 text-xs text-foreground">
+          <input v-model="forceReset" type="checkbox" class="h-4 w-4 accent-[var(--primary)]" />
+          强制修改密码
+        </label>
+        <p class="text-[11px] leading-relaxed text-muted-foreground">
+          勾选后，即使对方已有密码，也需通过邀请链接重新设置登录密码才能加入。
+        </p>
+      </div>
+
       <PermissionMatrix v-model="permissions" />
       <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-1.5 text-xs text-destructive">
         {{ error }}
@@ -113,7 +142,7 @@ async function copyLink() {
       <div class="rounded-lg border border-primary/40 bg-accent/50 p-3 text-xs leading-relaxed text-foreground">
         <p class="flex items-center gap-1.5 font-medium"><Link2 class="h-3.5 w-3.5 text-primary" /> 邀请已创建</p>
         <p class="mt-1 text-muted-foreground">
-          明文 token 只在此链接中出现，服务端仅保存哈希。关闭后将无法再次查看，请立即复制。
+          明文令牌只在此链接中出现，服务端仅保存其哈希值。关闭后将无法再次查看，请立即复制。
         </p>
       </div>
       <Input :model-value="inviteLink" readonly />

@@ -12,7 +12,7 @@ const target = ref('')
 const options = computed(() => [
   ...dnd.days.value.map((d) => ({
     value: d.id,
-    label: `Day ${d.day_index}${d.date ? ` · ${formatDate(d.date)}` : ''}`,
+    label: `第 ${d.day_index} 天${d.date ? ` · ${formatDate(d.date)}` : ''}`,
   })),
   { value: POOL_KEY, label: '待规划池' },
 ])
@@ -41,7 +41,7 @@ function onSelect() {
       class="ml-auto h-7 max-w-[9rem] rounded-md border border-input bg-card px-1.5 text-[11px] text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
       @change="onSelect"
     >
-      <option value="">移至…</option>
+      <option value="">移至某天</option>
       <option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option>
     </select>
   </div>

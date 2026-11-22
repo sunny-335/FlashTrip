@@ -16,7 +16,7 @@ withDefaults(
   {
     title: '确认操作',
     message: '确定要继续吗？',
-    confirmText: '确认',
+    confirmText: '确定',
     cancelText: '取消',
     danger: false,
     busy: false,

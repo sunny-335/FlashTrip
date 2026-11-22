@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 第 5 步：主密钥强制备份、可选 Redis、AI 写工具开关。 */
+/** 第 6 步：主密钥强制备份、可选 Redis、AI 写工具开关。 */
 import { computed, onMounted } from 'vue'
 import { KeyRound, Download, Copy, CheckCircle2, Eye, EyeOff } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
@@ -30,9 +30,9 @@ function downloadBackup() {
     `secret_key: ${key}`,
     '',
     '说明：',
-    '1. 该主密钥用于加密存储 AI / 地图 API Key，写入 /data/config.json。',
-    '2. 请离线妥善保管；丢失后已加密数据无法解密，需重新配置密钥与全部密钥。',
-    '3. 若部署时设置了环境变量 FLASHTRIP_SECRET_KEY，则以环境变量为准。',
+    '1. 该主密钥用于加密存储人工智能与地图供应商密钥，写入服务端配置文件。',
+    '2. 请离线妥善保管；丢失后已加密数据无法解密，需重新配置主密钥与全部供应商密钥。',
+    '3. 若部署时设置了环境变量 FLASHTRIP_SECRET_KEY（服务端主密钥变量），则以环境变量为准。',
     '',
     `生成时间：${new Date().toLocaleString('zh-CN')}`,
   ].join('\n')
@@ -89,7 +89,7 @@ function toggleRedis() {
 
     <div class="rounded-lg border border-border bg-card p-3">
       <div class="flex items-center justify-between">
-        <span class="text-xs font-medium">主密钥 SECRET_KEY</span>
+        <span class="text-xs font-medium">主密钥</span>
         <div class="flex items-center gap-1">
           <button class="rounded-md p-1.5 text-muted-foreground hover:bg-muted" title="显示/隐藏" @click="probe.secretVisible = !probe.secretVisible">
             <EyeOff v-if="probe.secretVisible" class="h-3.5 w-3.5" />

@@ -26,7 +26,14 @@ from app.core.response import envelope, register_exception_handlers
 
 log = get_logger(__name__)
 
-_PUBLIC_API_PREFIXES = ("/api/v1/wizard", "/api/v1/health", "/api/v1/invites/")
+_PUBLIC_API_PREFIXES = (
+    "/api/v1/wizard",
+    "/api/v1/health",
+    "/api/v1/invites/",
+    "/api/v1/share/",                     # 公开分享视图（未安装守卫也要放行）
+    "/api/v1/uploads/",                   # 公开分享页图片；端点内已按「公开瞬间引用」二次校验
+    "/api/v1/auth/password-strength",     # 密码强度实时评估（公开）
+)
 
 
 def _is_public(path: str) -> bool:
@@ -60,6 +67,26 @@ def create_app() -> FastAPI:
         return response
 
     register_exception_handlers(app)
+
+    @app.on_event("startup")
+    def _start_backup_scheduler() -> None:
+        """启动备份/天气提醒守护线程；任何异常都不得阻断应用启动。"""
+        try:
+            from app.services import backup_service
+
+            backup_service.start_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("backup.scheduler_startup_failed", error=type(exc).__name__)
+
+    @app.on_event("shutdown")
+    def _stop_backup_scheduler() -> None:
+        try:
+            from app.services import backup_service
+
+            backup_service.stop_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("backup.scheduler_shutdown_failed", error=type(exc).__name__)
+
     app.include_router(api_router)
 
     static = static_dir()
