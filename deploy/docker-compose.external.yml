@@ -3,6 +3,7 @@
 services:
   flashtrip:
     image: ghcr.io/sunny-335/flashtrip:latest
+    # 容器内默认监听 8000；自定义端口见根目录 docker-compose.yml 注释
     ports:
       - "8000:8000"
     volumes:

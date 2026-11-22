@@ -4,6 +4,8 @@ services:
     image: ghcr.io/sunny-335/flashtrip:latest
     # 本地构建时改为：build: { context: ., args: {} }
     container_name: flashtrip
+    # 容器内默认监听 8000。只换对外端口：改为 "6781:8000"；
+    # 容器内也要改：加 environment 的 FLASHTRIP_PORT: 6781 并用 "6781:6781"。
     ports:
       - "8000:8000"
     volumes:

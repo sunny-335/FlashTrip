@@ -24,6 +24,16 @@ docker run -d --name flashtrip \
   ghcr.io/sunny-335/flashtrip:latest
 ```
 
+> **容器内默认监听 8000**。若对外想用别的端口，有两种写法（二选一，别混用）：
+>
+> | 目标 | 写法 | 反向代理目标 |
+> | --- | --- | --- |
+> | 只换宿主机端口（**推荐，无需重建镜像**） | `-p 6781:8000` | `http://127.0.0.1:6781` |
+> | 容器内也改成 6781 | `-e FLASHTRIP_PORT=6781 -p 6781:6781` | `http://127.0.0.1:6781` |
+>
+> 写成 `-p 6781:6781` 却不带 `FLASHTRIP_PORT=6781`，容器内 6781 无人监听 → 反代必然 **502 Bad Gateway**。
+> 注意：`FLASHTRIP_PORT` 需镜像内已包含该支持（重建/重新拉取后才生效）；当前 GHCR 镜像请先用第一种写法。
+
 浏览器打开 <http://localhost:8000/> → 自动跳转 `/install` → 六步向导：
 
 1. **数据库**：默认 SQLite（`/data/flashtrip.db`），可切换外部 PostgreSQL 并测试连接
@@ -58,7 +68,7 @@ pnpm dev            # http://localhost:5173，/api 代理到 8000
 | --- | --- |
 | `/data/config.json` | **权威配置**：DB 连接串、安装状态、`secret_key` 等（原子写入 + DB 镜像） |
 | DB `app_config` | 配置镜像，config.json 丢失时用于恢复回写 |
-| 环境变量 | 统一前缀 `FLASHTRIP_`：`SECRET_KEY` / `DATA_DIR` / `STATIC_DIR` / `DATABASE_URL` / `REDIS_URL` / `LOG_LEVEL` / `TZ` / `VERSION` |
+| 环境变量 | 统一前缀 `FLASHTRIP_`：`SECRET_KEY` / `PORT` / `DATA_DIR` / `STATIC_DIR` / `DATABASE_URL` / `REDIS_URL` / `LOG_LEVEL` / `TZ` / `VERSION` |
 | DB 加密列 | LLM / 地图 API Key 用 Fernet 加密；主密钥存于 `/data/config.json`（或由 `FLASHTRIP_SECRET_KEY` 提供），**丢失后密文不可解，必须备份** |
 
 **向导配置不读取 compose 环境变量**；API Key 只在运行时由用户在向导填写，不进镜像、不进仓库、不进前端。
@@ -84,6 +94,8 @@ deploy/     外部 PG/Redis 连接示例
 | GHCR 推送 403 | workflow 缺 `permissions: packages: write` |
 | 重启后向导重来 | 检查 `/data` 卷是否持久化、`config.json` 是否存在 |
 | 更换主密钥后 API Key 失效 | 需重新填写密钥；`FLASHTRIP_SECRET_KEY` 必须备份 |
+| 反向代理 **502 Bad Gateway** | 容器内默认监听 `8000`；`-p 6781:6781` 不带 `FLASHTRIP_PORT=6781` 时容器内无监听。改成 `-p 6781:8000`，或加 `-e FLASHTRIP_PORT=6781`。用 `docker exec flashtrip curl -fsS http://127.0.0.1:8000/api/v1/health` 先确认容器内服务存活 |
+| 反向代理后 AI 对话 / 协作不同步 | SSE 需要 `proxy_buffering off;` + `proxy_read_timeout 300s;` + `proxy_http_version 1.1;` 与 `Upgrade`/`Connection` 头，否则流式响应会被缓冲或超时截断 |
 
 ## 状态
 

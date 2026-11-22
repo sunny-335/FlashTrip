@@ -45,6 +45,7 @@ ENV PIP_DEFAULT_TIMEOUT=60 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
+    FLASHTRIP_PORT=8000 \
     FLASHTRIP_DATA_DIR=/data \
     FLASHTRIP_STATIC_DIR=/app/app/static
 
@@ -64,10 +65,12 @@ RUN chmod 0755 /entrypoint.sh \
  && chown -R flash:flash /app /data
 
 VOLUME ["/data"]
+# EXPOSE 仅为元数据，实际监听端口由 FLASHTRIP_PORT 决定（默认 8000）
 EXPOSE 8000
 
+# shell form：${FLASHTRIP_PORT} 在容器运行时展开，能读到 docker run -e 的覆盖值
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/api/v1/health >/dev/null || exit 1
+    CMD curl -fsS "http://127.0.0.1:${FLASHTRIP_PORT}/api/v1/health" >/dev/null || exit 1
 
 # 保持单进程：SQLite 单写者约束，禁止 --workers > 1
 ENTRYPOINT ["/entrypoint.sh"]
