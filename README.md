@@ -41,6 +41,30 @@ docker run -d --name flashtrip \
 
 > 容器默认监听 8000。仅更换宿主机端口用 `-p 6781:8000`；如需容器内一并改端口，加 `-e FLASHTRIP_PORT=6781` 并配合 `-p 6781:6781`。反向代理目标须与容器内端口一致，否则返回 502。
 
+## 更新
+
+镜像发布后，任选一种方式更新。数据保存在 `flashtrip-data` 卷中，不会随容器删除丢失；**必须沿用首次部署的 `FLASHTRIP_SECRET_KEY`**，否则已加密的 API Key 无法解密。
+
+一键脚本（自动继承旧容器的环境变量、端口、卷与重启策略，启动失败自动回滚）：
+
+```bash
+sh scripts/update.sh
+```
+
+单行命令（不依赖仓库，参数按实际部署调整）：
+
+```bash
+docker pull ghcr.io/sunny-335/flashtrip:latest && docker rm -f flashtrip && docker run -d --name flashtrip -p 8000:8000 -v flashtrip-data:/data -e TZ=Asia/Shanghai -e FLASHTRIP_SECRET_KEY="<与首次部署一致>" --restart unless-stopped ghcr.io/sunny-335/flashtrip:latest
+```
+
+使用 compose：
+
+```bash
+docker compose pull && docker compose up -d --force-recreate
+```
+
+更新后确认：`docker exec flashtrip curl -fsS http://127.0.0.1:8000/api/v1/health`
+
 ## 功能
 
 - **行程**：每日时间线三栏拖拽、地点/交通卡片、开始/时长/结束联动、冲突标红与 AI 重排、自动保存与快捷键
@@ -81,7 +105,7 @@ pnpm dev
 ```
 backend/    FastAPI 应用、模型、迁移、服务、测试
 frontend/   Vue 3 SPA
-scripts/    容器入口与镜像探测
+scripts/    容器入口、镜像探测、本地构建与更新脚本
 .github/    CI/CD（GHCR 单镜像）
 deploy/     外部 PostgreSQL / Redis 连接示例
 ```
