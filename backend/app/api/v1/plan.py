@@ -1,0 +1,117 @@
+"""三栏计划 API：一次取板、条目 CRUD、批量拖拽 / undo、导入、GeoJSON 路线。
+
+所有写端点统一声明 Depends(require_permission("plan:write"))。
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy.orm import Session
+
+from app.api.v1.deps import get_db, require_permission
+from app.core.response import ok
+from app.schemas.common import dump, dump_many
+from app.schemas.plan import (
+    ImportIn,
+    MovesIn,
+    PlanItemCreate,
+    PlanItemOut,
+    PlanItemUpdate,
+)
+from app.services import plan_service
+
+router = APIRouter(tags=["plan"])
+
+
+@router.get("/trips/{trip_id}/plan")
+def get_plan(
+    trip_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("trip:read")),
+):
+    return ok(plan_service.get_plan(db, trip_id), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.post("/trips/{trip_id}/plan/items")
+def create_item(
+    trip_id: str,
+    payload: PlanItemCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    item = plan_service.create_item(db, trip_id, payload, user.id)
+    return ok(dump(PlanItemOut, item), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.put("/trips/{trip_id}/plan/items/{item_id}")
+def update_item(
+    trip_id: str,
+    item_id: str,
+    payload: PlanItemUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    item = plan_service.update_item(db, trip_id, item_id, payload)
+    return ok(dump(PlanItemOut, item), request_id=getattr(request.state, "request_id", ""))
+
+
+@router.delete("/trips/{trip_id}/plan/items/{item_id}")
+def delete_item(
+    trip_id: str,
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    plan_service.delete_item(db, trip_id, item_id)
+    return ok({"deleted": item_id}, request_id=getattr(request.state, "request_id", ""))
+
+
+@router.post("/trips/{trip_id}/plan/moves")
+def apply_moves(
+    trip_id: str,
+    payload: MovesIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    result = plan_service.apply_moves(db, trip_id, user.id, payload.moves)
+    return ok(result, request_id=getattr(request.state, "request_id", ""))
+
+
+@router.post("/trips/{trip_id}/plan/moves/undo")
+def undo_moves(
+    trip_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    result = plan_service.undo_moves(db, trip_id)
+    return ok(result, request_id=getattr(request.state, "request_id", ""))
+
+
+@router.post("/trips/{trip_id}/plan/import")
+def import_items(
+    trip_id: str,
+    payload: ImportIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("plan:write")),
+):
+    items = plan_service.import_items(db, trip_id, user.id, payload.items)
+    return ok(
+        {"created": len(items), "items": dump_many(PlanItemOut, items)},
+        request_id=getattr(request.state, "request_id", ""),
+    )
+
+
+@router.get("/trips/{trip_id}/plan/route")
+def plan_route(
+    trip_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("trip:read")),
+):
+    return ok(plan_service.build_route(db, trip_id), request_id=getattr(request.state, "request_id", ""))

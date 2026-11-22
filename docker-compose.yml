@@ -1,0 +1,18 @@
+# 最小单镜像示例：不启动任何数据库容器，SQLite 数据落在命名卷。
+services:
+  flashtrip:
+    image: ghcr.io/sunny-335/flashtrip:latest
+    # 本地构建时改为：build: { context: ., args: {} }
+    container_name: flashtrip
+    ports:
+      - "8000:8000"
+    volumes:
+      - flashtrip-data:/data
+    environment:
+      TZ: Asia/Shanghai
+      FLASHTRIP_LOG_LEVEL: INFO
+      # FLASHTRIP_SECRET_KEY: "请备份；留空则由安装向导生成"
+    restart: unless-stopped
+
+volumes:
+  flashtrip-data:

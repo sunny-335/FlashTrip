@@ -1,0 +1,19 @@
+# 外部 PostgreSQL / Redis 连接示例 —— 仅演示连接串填写，不启动任何数据库容器。
+# 镜像本身不捆绑 DB；在「安装向导 → 数据库」里填写下方地址即可切换。
+services:
+  flashtrip:
+    image: ghcr.io/sunny-335/flashtrip:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - flashtrip-data:/data
+    environment:
+      TZ: Asia/Shanghai
+      FLASHTRIP_LOG_LEVEL: INFO
+      # 仅示例：连接串可覆盖默认 SQLite；业务配置仍由向导管理
+      # FLASHTRIP_DATABASE_URL: postgresql+psycopg://flashtrip:change-me@postgres:5432/flashtrip
+      # FLASHTRIP_REDIS_URL: redis://redis:6379/0
+    restart: unless-stopped
+
+volumes:
+  flashtrip-data:

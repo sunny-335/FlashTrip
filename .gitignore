@@ -1,0 +1,45 @@
+# Python / backend
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
+
+# Build artifacts injected at image build time
+backend/app/static/*
+!backend/app/static/.gitkeep
+
+# Runtime data (never commit)
+/data/
+.smoke/
+.testdata/
+.pytest-tmp/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+config.json
+.installed
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# WorkBuddy project data (keep)
+# .workbuddy/ is intentionally NOT ignored

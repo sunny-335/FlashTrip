@@ -1,0 +1,13 @@
+# 防止 Windows checkout 把容器内脚本转成 CRLF 导致 /bin/sh^M 报错
+*              text=auto eol=lf
+*.sh           text eol=lf
+Dockerfile     text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.py           text eol=lf
+*.ts           text eol=lf
+*.vue          text eol=lf
+*.json         text eol=lf
+*.md           text eol=lf
+pnpm-lock.yaml text eol=lf
+uv.lock        text eol=lf

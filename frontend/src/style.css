@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+/* shadcn-vue (new-york / neutral / cssVariables) — 一次定稿，不可逆 */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.75rem;
+  --background: #fafaf8;
+  --foreground: #1c211f;
+  --card: #ffffff;
+  --card-foreground: #1c211f;
+  --popover: #ffffff;
+  --popover-foreground: #1c211f;
+  --primary: #0e9f8e;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f3f1;
+  --secondary-foreground: #2b332f;
+  --muted: #f3f5f3;
+  --muted-foreground: #6b756f;
+  --accent: #e8f5f2;
+  --accent-foreground: #0b6f63;
+  --destructive: #d64545;
+  --destructive-foreground: #ffffff;
+  --border: #e4e8e5;
+  --input: #e4e8e5;
+  --ring: #0e9f8e;
+}
+
+.dark {
+  --background: #141816;
+  --foreground: #eef2ef;
+  --card: #1c211f;
+  --card-foreground: #eef2ef;
+  --popover: #1c211f;
+  --popover-foreground: #eef2ef;
+  --primary: #2bbba6;
+  --primary-foreground: #06231f;
+  --secondary: #262d29;
+  --secondary-foreground: #eef2ef;
+  --muted: #232a26;
+  --muted-foreground: #9aa69f;
+  --accent: #1e3833;
+  --accent-foreground: #7fe0cf;
+  --destructive: #e06a6a;
+  --destructive-foreground: #1a0b0b;
+  --border: #2c342f;
+  --input: #2c342f;
+  --ring: #2bbba6;
+}
+
+@layer base {
+  * { border-color: var(--border); }
+  html, body, #app { min-height: 100%; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { letter-spacing: -0.015em; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+}

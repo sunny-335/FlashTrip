@@ -1,0 +1,106 @@
+name: build-and-publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# GHCR 推送必需；缺失 packages: write 是 403 的首要原因
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/sunny-335/flashtrip
+
+jobs:
+  verify:
+    name: lint / unit tests / build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@12.18.0 --activate && pnpm --version
+      - name: Frontend install (frozen)
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile --allow-build=esbuild --allow-build=vue-demi
+      - name: Frontend unit tests
+        working-directory: frontend
+        run: pnpm test
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: pnpm typecheck
+      - name: Frontend build
+        working-directory: frontend
+        run: pnpm build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv
+      - name: Backend install (frozen)
+        working-directory: backend
+        run: uv sync --frozen --no-dev --extra test --no-install-project
+      - name: Backend tests
+        working-directory: backend
+        run: uv run --no-sync pytest -q
+
+  publish:
+    name: build & push single image
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe fastest mirrors
+        id: mirrors
+        run: sh scripts/mirror_probe.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      # PR 不登录、不推送；login 与 push 使用完全相同的 if 条件
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APT_MIRROR=${{ steps.mirrors.outputs.apt_mirror }}
+            PIP_INDEX_URL=${{ steps.mirrors.outputs.pip_index_url }}
+            NPM_REGISTRY=${{ steps.mirrors.outputs.npm_registry }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
