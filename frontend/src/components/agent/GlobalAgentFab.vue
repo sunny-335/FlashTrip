@@ -10,7 +10,7 @@ const open = ref(false)
 <template>
   <!-- 按钮位置恒定，不随面板开合变化 -->
   <button
-    class="fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105"
+    class="fixed right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105 bottom-6 [@media(max-width:768px)]:bottom-[calc(5rem+var(--safe-bottom))]"
     title="瞬旅 AI 助手"
     :aria-expanded="open"
     aria-label="开关瞬旅 AI 助手"

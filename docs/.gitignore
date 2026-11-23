@@ -1,0 +1,4 @@
+# 文档站构建产物与依赖（源码均入库，产物在镜像构建时生成）
+node_modules/
+.vitepress/dist/
+.vitepress/cache/

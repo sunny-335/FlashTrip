@@ -4,8 +4,9 @@
  *  开始 / 时长 / 结束交给 TimeField 联动，时长统一显示 2h10m，日期用所属行程日的 date 拼 ISO。
  */
 import { computed, reactive, ref, watch } from 'vue'
-import { Loader2 } from 'lucide-vue-next'
-import { ApiError } from '@/lib/api'
+import { Loader2, LocateFixed, Search, Link2 } from 'lucide-vue-next'
+import { useToastStore } from '@/stores/toast'
+import { ApiError, api } from '@/lib/api'
 import { keyBetween } from '@/lib/sortKey'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -23,12 +24,16 @@ const props = withDefaults(
 const open = defineModel<boolean>({ default: false })
 const { dnd } = usePlanContext()
 const plan = usePlanStore()
+const toast = useToastStore()
 
 const form = reactive({
   type: 'place' as string,
   title: '',
   subtitle: '',
   address: '',
+  lng: null as number | null,
+  lat: null as number | null,
+  coord_system: 'WGS84',
   category: '',
   day_id: '',
   note: '',
@@ -75,9 +80,13 @@ watch(open, (v) => {
   if (!v) return
   form.type = props.defaultType
   form.day_id = props.defaultDayId ?? ''
+  linkedItemId.value = ''
   form.title = ''
   form.subtitle = ''
   form.address = ''
+  form.lng = null
+  form.lat = null
+  form.coord_system = 'WGS84'
   form.category = ''
   form.note = ''
   form.startTime = null
@@ -93,6 +102,59 @@ function endSortKey(): string {
   const existing = dnd.lists[targetKey] ?? []
   const last = existing.length ? existing[existing.length - 1].sort_key : null
   return keyBetween(last, null)
+}
+
+const locating = ref(false)
+const locationMessage = ref('')
+const linkedItemId = ref('')
+const existingPlaceOptions = computed(() => [
+  { value: '', label: '不关联' },
+  ...plan.allItems.filter((item) => item.type === 'place' && typeof item.lng === 'number' && typeof item.lat === 'number')
+    .map((item) => ({ value: item.id, label: item.title })),
+])
+function linkExistingPlace(id: string) {
+  linkedItemId.value = id
+  const item = plan.allItems.find((candidate) => candidate.id === id)
+  if (!item) return
+  form.title = item.title
+  form.subtitle = item.subtitle ?? ''
+  form.address = item.address ?? ''
+  form.lng = item.lng ?? null
+  form.lat = item.lat ?? null
+  form.coord_system = item.coord_system ?? 'WGS84'
+  locationMessage.value = '已关联行程中的地点'
+}
+async function geocodeAddress() {
+  if (!form.address.trim() || locating.value) return
+  locating.value = true
+  locationMessage.value = ''
+  try {
+    const result = await api.get<{ lng: number; lat: number; coord_system: string }>(`/map/geocode?address=${encodeURIComponent(form.address.trim())}`)
+    form.lng = result.lng
+    form.lat = result.lat
+    form.coord_system = result.coord_system || 'WGS84'
+    locationMessage.value = '已根据地址填入坐标'
+  } catch (e) {
+    locationMessage.value = (e as Error).message || '地址搜索失败'
+  } finally {
+    locating.value = false
+  }
+}
+
+async function useCurrentLocation() {
+  if (!navigator.geolocation) { locationMessage.value = '此设备不支持定位'; return }
+  locating.value = true
+  locationMessage.value = ''
+  navigator.geolocation.getCurrentPosition((position) => {
+    form.lng = position.coords.longitude
+    form.lat = position.coords.latitude
+    form.coord_system = 'WGS84'
+    locationMessage.value = '已使用当前位置'
+    locating.value = false
+  }, (e) => {
+    locationMessage.value = e.message || '无法获取当前位置'
+    locating.value = false
+  }, { enableHighAccuracy: true, timeout: 10000 })
 }
 
 async function submit() {
@@ -117,6 +179,9 @@ async function submit() {
     title: form.title.trim(),
     subtitle: form.subtitle.trim() || null,
     address: form.address.trim() || null,
+    lng: form.lng,
+    lat: form.lat,
+    coord_system: form.coord_system,
     category: form.category || null,
     start_time: form.startTime,
     end_time: form.endTime,
@@ -150,6 +215,10 @@ async function submit() {
         </div>
       </div>
       <div class="space-y-1.5">
+        <label class="flex items-center gap-1 text-xs font-medium"><Link2 class="size-3.5" />关联已有地点</label>
+        <Select :model-value="linkedItemId" :options="existingPlaceOptions" @update:model-value="linkExistingPlace" />
+      </div>
+      <div class="space-y-1.5">
         <label class="text-xs font-medium">标题 <span class="text-destructive">*</span></label>
         <Input v-model="form.title" placeholder="例如：灵隐寺" />
       </div>
@@ -159,7 +228,8 @@ async function submit() {
       </div>
       <div class="space-y-1.5">
         <label class="text-xs font-medium">地址</label>
-        <Input v-model="form.address" placeholder="可选" />
+        <div class="flex gap-1.5"><Input v-model="form.address" placeholder="输入地址后可搜索坐标" /><Button type="button" variant="outline" size="sm" :disabled="locating" @click="geocodeAddress"><Search class="h-3.5 w-3.5" /> 搜索</Button><Button type="button" variant="outline" size="sm" :disabled="locating" title="使用当前位置" @click="useCurrentLocation"><LocateFixed class="h-3.5 w-3.5" /></Button></div>
+        <p class="text-[10px] text-muted-foreground">{{ locationMessage || (form.lng !== null && form.lat !== null ? '地点坐标已自动填入' : '搜索地址或使用当前位置后自动填入坐标') }}</p>
       </div>
       <div class="space-y-1.5">
         <label class="text-xs font-medium">分类</label>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 行程规划页：解析 tripId、取行程标题，主体交给三栏 PlanBoard。
- *  快捷键只在本视图注册：Ctrl+S 保存 / Ctrl+N 新建卡片 / Ctrl+Z 撤销上次移动。
+ *  快捷键只在本视图注册：Ctrl+S 保存 / Ctrl+Z 撤销最近一次可撤销的移动。
  *  路由离开 / 卸载时若有未提交变更，自动 flush() 等待全部写请求落库，避免「返回就没了」。
  */
 import { computed, onBeforeUnmount, onMounted, onUnmounted, ref } from 'vue'
@@ -85,11 +85,6 @@ function onKeydown(e: KeyboardEvent): void {
     return
   }
   if (e.shiftKey || isTyping(e.target)) return
-  if (key === 'n') {
-    e.preventDefault()
-    board.value?.openAdd('place')
-    return
-  }
   if (key === 'z') {
     e.preventDefault()
     void board.value?.undoLast()

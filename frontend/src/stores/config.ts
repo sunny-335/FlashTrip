@@ -43,15 +43,7 @@ export interface MapPreset {
   auditNumber: string
 }
 export const MAP_PRESETS: MapPreset[] = [
-  { id: 'openfreemap-liberty', label: 'OpenFreeMap · Liberty', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
-  { id: 'openfreemap-bright', label: 'OpenFreeMap · Bright', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
-  { id: 'openfreemap-positron', label: 'OpenFreeMap · Positron', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
-  { id: 'openfreemap-dark', label: 'OpenFreeMap · Dark', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
-  { id: 'openfreemap-fiord', label: 'OpenFreeMap · Fiord', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
-  { id: 'openfreemap-3d', label: 'OpenFreeMap · 3D', attribution: '© OpenFreeMap · © OpenStreetMap contributors', auditNumber: '' },
-  { id: 'mapbox', label: 'Mapbox', attribution: '© Mapbox · © OpenStreetMap contributors', auditNumber: '' },
   { id: 'amap', label: '高德地图', attribution: '© 高德地图', auditNumber: '' },
-  { id: 'baidu', label: '百度地图', attribution: '© 百度地图', auditNumber: '' },
   { id: 'tianditu', label: '天地图', attribution: '© 天地图', auditNumber: '' },
 ]
 

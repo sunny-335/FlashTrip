@@ -7,6 +7,7 @@
 import { onMounted, ref } from 'vue'
 import { Bot, Save, Loader2, Plus, Trash2 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
+import { useToastStore } from '@/stores/toast'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -40,33 +41,27 @@ const aiToolsEnabled = ref(false)
 const tools = ref<ToolsConfig | null>(null)
 const loading = ref(true)
 const saving = ref(false)
-const notice = ref('')
-const error = ref('')
+const toast = useToastStore()
 
 function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
 }
-function flash(text: string) {
-  notice.value = text
-  window.setTimeout(() => { notice.value = '' }, 2600)
-}
 
 async function load() {
   loading.value = true
-  error.value = ''
   try {
     const [settings, toolCfg] = await Promise.all([
       api.get<SettingsView>('/settings'),
       api.get<ToolsConfig>('/ai/tools').catch(() => null),
     ])
     const list = settings.config?.ai?.providers ?? settings.ai?.providers ?? []
-    draft.value = list.map((p) => ({ ...p, api_key: '' }))
+    draft.value = list.map((p) => ({ id: p.id, base_url: p.base_url, model: p.model, enabled: p.enabled, priority: p.priority, timeout_s: p.timeout_s, has_api_key: p.has_api_key, api_key: '' }))
     aiToolsEnabled.value = Boolean(
       settings.config?.security?.ai_tools_enabled ?? settings.security?.ai_tools_enabled,
     )
     tools.value = toolCfg
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     loading.value = false
   }
@@ -85,7 +80,6 @@ function removeProvider(index: number) {
 async function save() {
   if (saving.value) return
   saving.value = true
-  error.value = ''
   try {
     await api.put('/settings', {
       ai_providers: draft.value
@@ -102,10 +96,10 @@ async function save() {
         })),
       ai_tools_enabled: aiToolsEnabled.value,
     })
-    flash('人工智能配置已保存')
+    toast.success('人工智能配置已保存')
     await load()
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     saving.value = false
   }
@@ -133,8 +127,6 @@ onMounted(load)
     </div>
 
     <p v-if="loading" class="text-xs text-muted-foreground">正在读取供应商配置…</p>
-    <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-xs text-destructive">{{ error }}</p>
-    <p v-if="notice" class="rounded-md border border-primary/40 bg-accent px-2.5 py-2 text-xs text-accent-foreground">{{ notice }}</p>
 
     <template v-if="!loading">
       <div class="space-y-2">

@@ -10,6 +10,7 @@ import {
   Loader2, Copy, Check, Download,
 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
+import { useToastStore } from '@/stores/toast'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -19,7 +20,6 @@ import PasswordStrength from './PasswordStrength.vue'
 const unlocked = ref(false)
 const unlockForm = reactive({ username: '', password: '' })
 const unlocking = ref(false)
-const unlockError = ref('')
 
 const rotating = ref(false)
 const newSecret = ref('')
@@ -29,15 +29,10 @@ const pwdForm = reactive({ old_password: '', new_password: '', confirm: '' })
 const strengthOk = ref(false)
 const changingPwd = ref(false)
 
-const notice = ref('')
-const error = ref('')
+const toast = useToastStore()
 
 function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
-}
-function flash(text: string) {
-  notice.value = text
-  window.setTimeout(() => { notice.value = '' }, 2600)
 }
 
 async function load() {
@@ -53,7 +48,6 @@ async function load() {
 async function unlock() {
   if (!unlockForm.username.trim() || !unlockForm.password || unlocking.value) return
   unlocking.value = true
-  unlockError.value = ''
   try {
     await api.post('/wizard/unlock', {
       username: unlockForm.username.trim(),
@@ -61,9 +55,9 @@ async function unlock() {
     })
     unlocked.value = true
     unlockForm.password = ''
-    flash('已解锁，现在可以轮换主密钥')
+    toast.success('已解锁，现在可以轮换主密钥')
   } catch (e) {
-    unlockError.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     unlocking.value = false
   }
@@ -72,17 +66,16 @@ async function unlock() {
 async function rotateSecret() {
   if (rotating.value) return
   rotating.value = true
-  error.value = ''
   newSecret.value = ''
   try {
     const res = await api.post<{ rotated: boolean; need_backup_secret: boolean; secret_key: string }>(
       '/settings/secret/rotate',
     )
     newSecret.value = res.secret_key || ''
-    flash('主密钥已轮换，请立即下载备份')
+    toast.success('主密钥已轮换，请立即下载备份')
   } catch (e) {
     // 由环境变量提供主密钥时后端会明确拒绝，原样展示中文原因
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     rotating.value = false
   }
@@ -124,7 +117,6 @@ const canChangePwd = computed(() => Boolean(
 async function changePassword() {
   if (!canChangePwd.value || changingPwd.value) return
   changingPwd.value = true
-  error.value = ''
   try {
     await api.post('/auth/change-password', {
       old_password: pwdForm.old_password,
@@ -133,9 +125,9 @@ async function changePassword() {
     pwdForm.old_password = ''
     pwdForm.new_password = ''
     pwdForm.confirm = ''
-    flash('登录密码已修改')
+    toast.success('登录密码已修改')
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     changingPwd.value = false
   }
@@ -146,9 +138,6 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-xs text-destructive">{{ error }}</p>
-    <p v-if="notice" class="rounded-md border border-primary/40 bg-accent px-2.5 py-2 text-xs text-accent-foreground">{{ notice }}</p>
-
     <!-- 危险项解锁 -->
     <Card class="space-y-3">
       <div class="flex items-center justify-between gap-2">
@@ -168,7 +157,6 @@ onMounted(load)
           <UnlockKeyhole v-else class="h-3.5 w-3.5" /> 解锁
         </Button>
       </form>
-      <p v-if="unlockError" class="text-xs text-destructive">{{ unlockError }}</p>
     </Card>
 
     <!-- 主密钥 -->

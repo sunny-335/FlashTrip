@@ -10,8 +10,9 @@ AI 驱动的自研多功能旅行规划应用。单镜像部署，首次访问�
 | 后端 | Python 3.12 + FastAPI + SQLAlchemy 2.0 + Alembic |
 | 数据 | SQLite 默认（`/data` 卷），向导可切换 PostgreSQL / Redis |
 | AI | 小米 MiMo / 通义千问 / DeepSeek / Kimi / OpenAI / 自定义 OpenAI 兼容端点 |
-| 地图 | OpenFreeMap / Mapbox（可选）/ 高德 / 百度 / 天地图，预设元数据自动带出署名与审图号 |
-| 部署 | GitHub Actions → GHCR 单镜像，`docker run` 启动 |
+| 地图 | 高德 / 天地图，预设元数据自动带出署名与审图号；路线与导航支持高德、腾讯、百度导航深链 |
+| 文档 | VitePress，应用内路由 `/FlashTrip/` |
+| 部署 | GitHub Actions → GHCR 单镜像，支持 `docker run` 与 Docker Compose |
 
 协议：MIT。信息架构参考 [TREK](https://github.com/liketrek/TREK)，未使用其 AGPL 源码，见 `NOTICE.md`。
 
@@ -68,6 +69,10 @@ docker compose pull && docker compose up -d --force-recreate
 ## 功能
 
 - **行程**：每日时间线三栏拖拽、地点/交通卡片、开始/时长/结束联动、冲突标红与 AI 重排、自动保存与快捷键
+- **预算与家庭**：总预算及分类预算、家庭成员与儿童标记、常用出行人员和多人费用分摊
+- **地图与路线**：高德/天地图底图、POI 与地理编码、路线规划；地图地点可选择高德/腾讯/百度导航
+- **天气邮件**：天气与建议先预览，手动发送或按出发前设置提醒；支持旅行中每日天气邮件
+- **对象存储**：本地、阿里云 OSS、Amazon S3 兼容存储可选
 - **业务**：预定、交通、费用（多人/儿童/家庭智能分账）、物品清单、瞬间（图片上传、逐条对外可见性）
 - **视图**：仪表盘、足迹地图、行程记忆、协作成员与细粒度权限、邀请链接（首次设密 / 强制改密）
 - **AI**：全局悬浮助手，只读工具直用、写操作二次确认、删除行程需「是/否」确认；出行前天气建议邮件

@@ -21,3 +21,5 @@ class Attachment(Base, TimestampMixin, SoftDeleteMixin):
     size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
     kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 存储后端：local（默认）/ oss / s3；对象存储时 storage_path 存对象键（object key）
+    backend: Mapped[str] = mapped_column(String(16), nullable=False, default="local")

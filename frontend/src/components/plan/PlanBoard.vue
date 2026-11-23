@@ -246,7 +246,7 @@ async function addDay() {
   }
 }
 
-/** 供 TripPlanView 的快捷键（Ctrl+N / Ctrl+Z）调用。 */
+/** 供 TripPlanView 的撤销快捷键调用。 */
 defineExpose({
   openAdd,
   undoLast: () => dnd.undoLast(),

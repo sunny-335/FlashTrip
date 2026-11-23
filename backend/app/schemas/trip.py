@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -56,6 +57,7 @@ class TripCreate(BaseModel):
     children_count: int = 0
     family_mode: bool = False
     family_name: str | None = Field(default=None, max_length=128)
+    total_budget: Decimal | None = Field(default=None, ge=0)
 
 
 class TripUpdate(BaseModel):
@@ -75,6 +77,11 @@ class TripUpdate(BaseModel):
     children_count: int | None = None
     family_mode: bool | None = None
     family_name: str | None = Field(default=None, max_length=128)
+    total_budget: Decimal | None = Field(default=None, ge=0)
+    # 天数联动：与 start_date 或 end_date 组合自动推算另一端（显式日期字段优先）
+    duration_days: int | None = None
+    # 日期缩短需二次确认：false 返回预览、true 才执行（移入待规划区并删除多余行程日）
+    confirm_shrink: bool = False
 
 
 class TripOut(ORMModel):
@@ -94,6 +101,9 @@ class TripOut(ORMModel):
     children_count: int = 0
     family_mode: bool = False
     family_name: str | None = None
+    total_budget: float | None = None
+    # 由 start_date / end_date 推算的行程天数（含首尾），非 ORM 字段
+    duration_days: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

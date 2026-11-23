@@ -78,7 +78,7 @@ interface DoneData {
   toolCalls?: { toolCallId: string; name: string; arguments: Record<string, unknown> }[]
 }
 interface ErrorData { code?: number; message?: string }
-interface HistoryRow { id?: string; role?: string; content?: string }
+interface HistoryRow { id?: string; role?: string; content?: string; toolCalls?: { toolCallId?: string; name?: string; arguments?: Record<string, unknown> }[]; tool_calls_json?: string; toolCallId?: string; tool_call_id?: string; toolResult?: unknown }
 
 let seq = 0
 function nextId(): string { return `m${Date.now().toString(36)}-${(seq++).toString(36)}` }
@@ -302,6 +302,17 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   /** 切换会话：加载该会话的历史消息并复用其 conversationId。 */
+  async function renameConversation(id: string, title: string): Promise<void> {
+    const updated = await api.patch<ConversationItem>(`/ai/conversations/${encodeURIComponent(id)}`, { title })
+    conversations.value = conversations.value.map((item) => item.id === id ? { ...item, ...updated } : item)
+  }
+
+  async function deleteConversation(id: string): Promise<void> {
+    await api.del(`/ai/conversations/${encodeURIComponent(id)}`)
+    conversations.value = conversations.value.filter((item) => item.id !== id)
+    if (conversationId.value === id) reset()
+  }
+
   async function openConversation(id: string): Promise<void> {
     controller?.abort()
     controller = null
@@ -310,11 +321,25 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       const rows = await api.get<HistoryRow[]>(`/ai/conversations/${encodeURIComponent(id)}/messages`)
       conversationId.value = id
-      messages.value = rows.map((row, index) => ({
-        id: row.id || `h${index}`,
-        role: row.role === 'user' ? 'user' : row.role === 'tool' ? 'tool' : 'assistant',
-        content: row.content ?? '',
-      }))
+      messages.value = rows.map((row, index) => {
+        let rawCalls = row.toolCalls
+        if (!rawCalls && row.tool_calls_json) {
+          try { rawCalls = JSON.parse(row.tool_calls_json) as HistoryRow['toolCalls'] } catch { rawCalls = [] }
+        }
+        const toolCalls: ToolCall[] = (rawCalls ?? []).map((call, n) => ({
+          toolCallId: call.toolCallId || `h${index}-t${n}`,
+          name: call.name || 'tool', arguments: call.arguments ?? {}, needConfirm: false, status: 'done',
+        }))
+        if (row.role === 'tool' && row.toolCallId) {
+          const call = messages.value.flatMap((m) => m.toolCalls ?? []).find((item) => item.toolCallId === row.toolCallId)
+          if (call) { call.result = row.toolResult ?? row.content; call.status = 'done' }
+        }
+        return {
+          id: row.id || `h${index}`,
+          role: row.role === 'user' ? 'user' as const : row.role === 'tool' ? 'tool' as const : 'assistant' as const,
+          content: row.content ?? '', toolCalls,
+        }
+      })
       pendingCalls.value = []
       error.value = ''
     } catch (e) {
@@ -331,6 +356,6 @@ export const useAgentStore = defineStore('agent', () => {
     conversationId, conversations, provider, model,
     messages, pendingCalls, streaming, streamBuffer, error,
     send, confirm, cancel, stop, reset, setModel,
-    loadConversations, openConversation, newConversation,
+    loadConversations, openConversation, renameConversation, deleteConversation, newConversation,
   }
 })

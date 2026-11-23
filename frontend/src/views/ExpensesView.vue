@@ -7,7 +7,7 @@
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Wallet, Plus, Trash2, Pencil, Loader2, CalendarDays, Users, ArrowRightLeft, RefreshCw } from 'lucide-vue-next'
+import { Wallet, Plus, Trash2, Pencil, Loader2, CalendarDays, Users, ArrowRightLeft, RefreshCw, Target } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import { formatDate, formatMoney } from '@/lib/utils'
 import Card from '@/components/ui/Card.vue'
@@ -69,6 +69,10 @@ const route = useRoute()
 const tripId = computed(() => String(route.params.tripId ?? ''))
 const base = computed(() => `/trips/${encodeURIComponent(tripId.value)}/expenses`)
 const items = ref<Expense[]>([])
+interface BudgetComparison { total_budget: number | null; total_spent: number; total_remaining: number | null; by_category: { category: string; budget: number | null; spent: number; remaining: number | null; over_budget: boolean }[] }
+const budget = ref<BudgetComparison | null>(null)
+const budgetInput = ref('')
+const budgetSaving = ref(false)
 const summary = ref<Summary | null>(null)
 const splitSummary = ref<SplitSummary | null>(null)
 const loading = ref(false)
@@ -163,18 +167,29 @@ async function load() {
   error.value = ''
   const url = dayFilter.value ? `${base.value}?day_id=${encodeURIComponent(dayFilter.value)}` : base.value
   try {
-    const [list, sum, split] = await Promise.all([
+    const [list, sum, split, comparison] = await Promise.all([
       api.get<Expense[]>(url),
       api.get<Summary>(`${base.value}/summary`).catch(() => null),
       api.get<SplitSummary>(`${base.value}/split-summary`).catch(() => null),
+      api.get<BudgetComparison>(`/trips/${encodeURIComponent(tripId.value)}/budget/comparison`).catch(() => null),
     ])
     items.value = list ?? []
     summary.value = sum
     splitSummary.value = split
+    budget.value = comparison
+    budgetInput.value = comparison?.total_budget == null ? '' : String(comparison.total_budget)
   } catch (e) { error.value = messageOf(e) } finally { loading.value = false }
 }
 
 function onFilterChange() { void load() }
+
+async function saveBudget() {
+  budgetSaving.value = true
+  try {
+    await api.put(`/trips/${encodeURIComponent(tripId.value)}/budget`, { total_budget: budgetInput.value === '' ? null : Number(budgetInput.value) })
+    budget.value = await api.get<BudgetComparison>(`/trips/${encodeURIComponent(tripId.value)}/budget/comparison`)
+  } catch (e) { error.value = messageOf(e) } finally { budgetSaving.value = false }
+}
 
 function openCreate() {
   editingId.value = null
@@ -354,6 +369,17 @@ onMounted(() => { void Promise.all([load(), loadPlanOptions()]) })
         </div>
       </Card>
     </div>
+
+    <Card class="space-y-3">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div><h2 class="flex items-center gap-2 text-sm font-semibold"><Target class="h-4 w-4 text-primary" /> 行程预算</h2><p class="mt-1 text-xs text-muted-foreground">预算对比数据由预算 API 提供</p></div>
+        <div class="flex items-center gap-2"><Input v-model="budgetInput" type="number" min="0" step="0.01" class="w-36" placeholder="总预算（元）" /><Button size="sm" :disabled="budgetSaving" @click="saveBudget">保存预算</Button></div>
+      </div>
+      <div v-if="budget" class="space-y-2 text-xs">
+        <p>已用 {{ money(budget.total_spent) }}<span v-if="budget.total_budget != null"> / {{ money(budget.total_budget) }} · 剩余 {{ money(budget.total_remaining) }}</span><span v-else> · 尚未设置总预算</span></p>
+        <div v-for="row in budget.by_category" :key="row.category" class="flex justify-between rounded-md bg-muted/40 px-2.5 py-1.5"><span>{{ categoryLabel(row.category) }}</span><span :class="row.over_budget ? 'text-destructive' : ''">{{ money(row.spent) }} / {{ row.budget == null ? '未设预算' : money(row.budget) }}<span v-if="row.over_budget"> · 已超支</span></span></div>
+      </div>
+    </Card>
 
     <!-- 多人智能分账面板 -->
     <Card v-if="splitSummary" class="space-y-3">

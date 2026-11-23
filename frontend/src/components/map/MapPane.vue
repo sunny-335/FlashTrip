@@ -205,7 +205,7 @@ onMounted(async () => {
       style: style as unknown as string | StyleSpecification,
       center: [104.2, 35.9],
       zoom: 3.2,
-      attributionControl: true,
+      attributionControl: {},
     })
     mapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
     // 首次 style.load 完成（MapLibre 的 load 事件）后再登记路线图层与 marker

@@ -204,7 +204,6 @@ onBeforeUnmount(() => collab.disconnect())
           {{ collab.connected ? '实时同步已连接' : collab.mode === 'poll' ? '轮询同步中' : '未连接' }}
         </span>
         <Button variant="outline" size="sm" @click="collab.load()"><RefreshCw class="h-3.5 w-3.5" /> 刷新</Button>
-        <Button variant="outline" size="sm" :disabled="!canManage" @click="shareOpen = true"><Share2 class="h-3.5 w-3.5" /> 新建分享链接</Button>
         <Button size="sm" :disabled="!canManage" @click="inviteOpen = true"><Plus class="h-3.5 w-3.5" /> 新建邀请</Button>
       </div>
     </div>
@@ -235,7 +234,7 @@ onBeforeUnmount(() => collab.disconnect())
             :selected-id="selectedId"
             :can-manage="canManage"
             @select="selectMember"
-            @remove="removeTarget = $event"
+            @remove="removeTarget = collab.members.find(member => member.id === $event) ?? null"
           />
           <p class="mt-3 text-[11px] text-muted-foreground">选中成员后在右侧编辑权限；所有者不可移除。</p>
         </Card>
@@ -324,7 +323,6 @@ onBeforeUnmount(() => collab.disconnect())
           </h2>
           <div class="flex items-center gap-2">
             <Button variant="outline" size="sm" @click="loadShares"><RefreshCw class="h-3.5 w-3.5" /> 刷新</Button>
-            <Button size="sm" :disabled="!canManage" @click="shareOpen = true"><Plus class="h-3.5 w-3.5" /> 新建分享链接</Button>
           </div>
         </div>
         <div v-if="sharesLoading" class="py-6 text-center text-xs text-muted-foreground"><Loader2 class="mx-auto mb-1.5 h-4 w-4 animate-spin" /> 正在加载…</div>

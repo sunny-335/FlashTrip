@@ -137,7 +137,7 @@ class InstallIn(BaseModel):
     admin: AdminIn
     ai_providers: list[AiProviderIn] = Field(default_factory=list)
     map_providers: list[MapProviderIn] = Field(default_factory=list)
-    map_default_provider_id: str = "openfreemap-liberty"
+    map_default_provider_id: str = "amap"
     audit_number: str = ""
     ai_tools_enabled: bool = False
     # 邮件通知：向导可配置也可跳过；跳过时只写 mail_skipped 标记。
@@ -504,7 +504,9 @@ def _sync_provider_tables(db: Session, cfg: dict) -> None:
 def _sync_preferences(db: Session, cfg: dict, *, admin_id: str | None = None) -> None:
     """AI 工具总开关 / 默认底图同步到用户偏好。"""
     ai_tools = bool((cfg.get("security") or {}).get("ai_tools_enabled"))
-    default_map = (cfg.get("map") or {}).get("default_provider_id", "openfreemap")
+    default_map = (cfg.get("map") or {}).get("default_provider_id", "amap")
+    if default_map not in {d["id"] for d in PROVIDER_DEFS if not d.get("internal")}:
+        default_map = "amap"
     rows = db.query(UserPreferences).all()
     for row in rows:
         row.ai_tools_enabled = ai_tools
@@ -749,7 +751,7 @@ def _merge_config(cfg: dict, payload: ConfigUpdateIn) -> dict:
     defaults = {
         "redis": {},
         "ai": {"providers": []},
-        "map": {"providers": [], "default_provider_id": "openfreemap", "audit_number": ""},
+        "map": {"providers": [], "default_provider_id": "amap", "audit_number": ""},
         "security": {"ai_tools_enabled": False},
     }
     for section, default in defaults.items():

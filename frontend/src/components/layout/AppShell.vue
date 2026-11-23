@@ -4,7 +4,10 @@
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LogOut, Settings, LayoutDashboard, MapPinned, Images } from 'lucide-vue-next'
+import { LogOut, Settings, LayoutDashboard, MapPinned, Images, ArrowLeft, Share2 } from 'lucide-vue-next'
+import { ref } from 'vue'
+import ShareDialog from '@/components/collab/ShareDialog.vue'
+import { useToastStore } from '@/stores/toast'
 import TopNavCenter from './TopNavCenter.vue'
 import TripNavCenter from './TripNavCenter.vue'
 import GlobalAgentFab from '@/components/agent/GlobalAgentFab.vue'
@@ -15,8 +18,13 @@ import { useUiStore } from '@/stores/ui'
 const route = useRoute()
 const router = useRouter()
 const ui = useUiStore()
+const toast = useToastStore()
+const shareOpen = ref(false)
 const isTrip = computed(() => route.path.startsWith('/trips/'))
 const showFab = computed(() => !route.path.startsWith('/settings') && !route.meta.hideAgent)
+const hideForDetail = computed(() => Boolean(route.meta.hideBottomNav) || isTrip.value || route.path.startsWith('/share/'))
+const showBottomNav = computed(() => ui.isMobile && !hideForDetail.value)
+const isSharePage = computed(() => route.path.startsWith('/share/'))
 
 const bottomItems = [
   { label: '仪表盘', path: '/dashboard', icon: LayoutDashboard },
@@ -37,18 +45,15 @@ async function logout() {
 
 <template>
   <div class="min-h-screen bg-background text-foreground">
-    <header class="sticky top-0 z-30 h-14 border-b border-border bg-card/90 backdrop-blur">
+    <header v-if="!ui.isMobile" class="sticky top-0 z-30 h-14 border-b border-border bg-card/90 backdrop-blur">
       <TripNavCenter v-if="isTrip" />
-      <div v-else class="mx-auto flex h-full max-w-[1600px] items-center gap-2 px-3 sm:gap-4 sm:px-5">
-        <RouterLink to="/dashboard" class="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
+      <div v-else class="relative mx-auto grid h-full max-w-[1600px] grid-cols-[1fr_auto_1fr] items-center px-5">
+        <RouterLink to="/dashboard" class="flex w-fit items-center gap-2 font-semibold tracking-tight">
           <img src="/logo.png" alt="瞬旅" class="h-7 w-7 rounded-md" />
           <span class="text-sm">瞬旅</span>
         </RouterLink>
-        <!-- 中央主导航在窄屏可横向滚动，不撑破顶栏 -->
-        <div class="min-w-0 flex-1">
-          <TopNavCenter />
-        </div>
-        <div class="flex shrink-0 items-center gap-0.5 sm:gap-1">
+        <div class="absolute left-1/2 h-full -translate-x-1/2"><TopNavCenter /></div>
+        <div class="col-start-3 flex justify-self-end items-center gap-1">
           <RouterLink to="/settings" class="rounded-md p-2 text-muted-foreground hover:bg-muted" title="设置">
             <Settings class="h-4 w-4" />
           </RouterLink>
@@ -59,16 +64,27 @@ async function logout() {
       </div>
     </header>
 
+    <!-- 行程详情在手机端隐藏主导航后，保留返回与行程设置入口。 -->
+    <div v-if="ui.isMobile && isTrip" class="sticky top-0 z-30 flex h-12 items-center justify-between border-b border-border bg-card/95 px-3 backdrop-blur">
+      <button class="flex min-h-11 items-center gap-1 text-sm text-muted-foreground" @click="router.push('/trips')">
+        <ArrowLeft class="size-4" /> 返回
+      </button>
+      <span class="truncate text-sm font-medium">{{ String(route.meta.title || '行程') }}</span>
+      <button class="flex min-h-11 items-center gap-1 px-2 text-sm text-primary" @click="shareOpen = true">
+        <Share2 class="size-4" /> 分享
+      </button>
+    </div>
+
     <!-- 手机端为底部导航栏预留安全区高度 -->
     <main
-      class="min-h-[calc(100vh_-_3.5rem)]"
-      :style="ui.isMobile ? { paddingBottom: 'calc(4rem + var(--safe-bottom))' } : undefined"
+      class="min-h-screen"
+      :style="showBottomNav ? { paddingBottom: 'calc(4rem + var(--safe-bottom))' } : undefined"
     >
       <slot />
     </main>
 
     <!-- 手机端底部导航栏 -->
-    <nav v-if="ui.isMobile" class="safe-bottom fixed inset-x-0 bottom-0 z-30 flex border-t border-border bg-card/95 backdrop-blur">
+    <nav v-if="showBottomNav" class="safe-bottom fixed inset-x-0 bottom-0 z-30 flex border-t border-border bg-card/95 backdrop-blur">
       <RouterLink
         v-for="item in bottomItems"
         :key="item.path"
@@ -81,6 +97,12 @@ async function logout() {
       </RouterLink>
     </nav>
 
+    <ShareDialog
+      v-if="isTrip"
+      v-model="shareOpen"
+      :trip-id="String(route.params.tripId)"
+      @created="toast.success('分享链接已创建')"
+    />
     <GlobalAgentFab v-if="showFab" />
     <RiskBanner />
   </div>

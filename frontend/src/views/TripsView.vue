@@ -118,7 +118,12 @@ function peopleText(t: TripCard): string {
   <div class="mx-auto max-w-[1200px] space-y-5 px-5 py-6">
     <div class="flex items-center justify-between">
       <div>
-        <h1 class="text-lg font-semibold">行程</h1>
+        <div class="flex flex-wrap items-center gap-3">
+          <h1 class="text-lg font-semibold">行程</h1>
+          <div class="inline-flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5">
+            <button v-for="t in tabs" :key="t.k" class="min-h-8 rounded-md px-2.5 text-[11px]" :class="filter === t.k ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground hover:bg-muted'" @click="setFilter(t.k)">{{ t.t }}</button>
+          </div>
+        </div>
         <p class="mt-0.5 text-xs text-muted-foreground">管理你的全部旅程</p>
       </div>
       <Button size="sm" @click="openCreate"><Plus class="h-3.5 w-3.5" /> 新建行程</Button>
@@ -167,7 +172,7 @@ function peopleText(t: TripCard): string {
       </div>
     </div>
 
-    <!-- 筛选放在内容区下方：顶部导航已收敛状态切换，本页仅在此处提供筛选 -->
+    <!-- 单一筛选入口，避免列表顶部与底部重复。 -->
     <div class="flex flex-wrap items-center justify-center gap-2 border-t border-border pt-4">
       <span class="text-xs text-muted-foreground">按状态筛选</span>
       <div class="inline-flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5">

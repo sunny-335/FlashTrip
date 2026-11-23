@@ -3,6 +3,7 @@
 import { Sparkles, UserRound } from 'lucide-vue-next'
 import type { ChatMessage, ToolCall } from '@/stores/agent'
 import ToolCallCard from './ToolCallCard.vue'
+import MarkdownText from '@/components/common/MarkdownText.vue'
 
 defineProps<{ message: ChatMessage; busy?: boolean }>()
 const emit = defineEmits<{
@@ -22,12 +23,13 @@ const emit = defineEmits<{
     </span>
     <div class="min-w-0 max-w-[86%] space-y-1.5">
       <div
-        class="whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-xs leading-relaxed"
+        class="break-words rounded-lg px-3 py-2 text-xs leading-relaxed"
         :class="message.role === 'user'
-          ? 'bg-primary/10 text-foreground'
+          ? 'bg-primary/10 text-foreground whitespace-pre-wrap'
           : 'border border-border bg-muted/50 text-foreground'"
       >
-        <span v-if="message.content">{{ message.content }}</span>
+        <span v-if="message.role === 'user' && message.content">{{ message.content }}</span>
+        <MarkdownText v-else-if="message.role === 'assistant' && message.content" :source="message.content" compact />
         <span v-if="message.streaming" class="ml-0.5 inline-block h-3 w-1 animate-pulse rounded-sm bg-primary align-middle" />
         <span v-if="!message.content && !message.streaming" class="text-muted-foreground">（空）</span>
       </div>

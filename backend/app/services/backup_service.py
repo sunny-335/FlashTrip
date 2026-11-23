@@ -254,11 +254,25 @@ def create_backup(kind: str = "manual") -> dict:
 
 
 def get_backup_bytes(filename: str) -> bytes:
-    """读取备份文件内容（供 export 端点的 StreamingResponse 使用）。"""
+    """读取备份文件内容（按文件名）；文件不存在抛语义化 404。"""
     path = _backups_dir() / Path(filename or "").name
     if not path.is_file():
-        raise AppError(ErrorCode.NOT_FOUND, "备份文件不存在或已被删除")
+        raise AppError(ErrorCode.BACKUP_FILE_MISSING, "备份文件不存在或已被删除")
     return path.read_bytes()
+
+
+def _resolve_backup_path(backup_id: str) -> Path:
+    """由备份 id（文件名去扩展名）解析磁盘路径，防路径穿越。"""
+    safe = Path(str(backup_id or "")).name
+    return _backups_dir() / (safe if safe.endswith(".zip") else f"{safe}.zip")
+
+
+def get_backup_bytes_by_id(backup_id: str) -> tuple[str, bytes]:
+    """按备份 id 读取文件内容，返回 (文件名, 字节)；文件不存在抛语义化 404。"""
+    path = _resolve_backup_path(backup_id)
+    if not path.is_file():
+        raise AppError(ErrorCode.BACKUP_FILE_MISSING, "备份文件不存在或已被删除")
+    return path.name, path.read_bytes()
 
 
 def list_backups() -> list[dict]:
@@ -353,8 +367,74 @@ _scheduler_stop = threading.Event()
 _last_backup_date = ""
 
 
+def run_daily_weather_reminders(now: datetime | None = None, db=None) -> dict:
+    """对在途行程发送当日天气+出行建议邮件；同一行程同一天只发一次。
+
+    返回 {enabled, fired, sent, failed, skipped}；单项失败不影响其它行程，
+    且绝不向上抛异常（供守护线程与测试直接调用）。
+    """
+    from app.services import mail_service, weather_service
+
+    now = now or datetime.now()
+    reminder = weather_service.get_daily_reminder_config()
+    if not reminder.get("enabled"):
+        return {"enabled": False, "fired": False, "sent": 0, "failed": 0, "skipped": 0}
+    # 仅在配置的发送时刻所在的这一分钟内触发（每分钟巡检一次，命中即发）
+    if now.strftime("%H:%M") != reminder.get("time"):
+        return {"enabled": True, "fired": False, "sent": 0, "failed": 0, "skipped": 0}
+    try:
+        if not mail_service.get_mail_config().get("enabled"):
+            return {"enabled": True, "fired": False, "sent": 0, "failed": 0, "skipped": 0,
+                    "reason": "邮件服务未启用"}
+    except Exception as exc:  # noqa: BLE001  读配置失败只跳过本轮
+        log.warning("backup.daily_reminder_config_failed", error=type(exc).__name__)
+        return {"enabled": True, "fired": False, "sent": 0, "failed": 0, "skipped": 0}
+
+    owns = False
+    session = db
+    if session is None:
+        try:
+            from app.db.session import get_session
+
+            session = get_session()()
+            owns = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("backup.daily_reminder_session_unavailable", error=type(exc).__name__)
+            return {"enabled": True, "fired": False, "sent": 0, "failed": 0, "skipped": 0}
+
+    sent = failed = skipped = 0
+    day_iso = now.date().isoformat()
+    try:
+        for trip in weather_service.check_active_trips(session):
+            trip_id = str(trip.get("trip_id") or "")
+            try:
+                if mail_service.daily_reminder_sent(session, trip_id, day_iso):
+                    skipped += 1
+                    continue
+                city = str(trip.get("destination") or "")
+                weather = weather_service.fetch_weather(city, db=session) if city else None
+                advice = mail_service.build_default_advice(weather)
+                subject = f"【今日出行】{day_iso} · {trip.get('title') or '我的行程'} · 天气与建议"
+                result = mail_service.send_weather_advice(
+                    session, trip, advice=advice, weather=weather,
+                    template=mail_service.DAILY_TEMPLATE, subject=subject,
+                )
+                sent += int(result.get("sent") or 0)
+                failed += int(result.get("failed") or 0)
+            except Exception as exc:  # noqa: BLE001  单个行程失败不影响其它
+                log.warning("backup.daily_reminder_dispatch_failed", error=type(exc).__name__)
+                failed += 1
+    finally:
+        if owns:
+            try:
+                session.close()
+            except Exception:
+                log.warning("backup.daily_reminder_close_failed")
+    return {"enabled": True, "fired": True, "sent": sent, "failed": failed, "skipped": skipped}
+
+
 def _tick() -> None:
-    """一次巡检：到点定时备份 + 临近行程天气提醒；单项失败不影响其它项。"""
+    """一次巡检：到点定时备份 + 临近出发提醒 + 在途行程每日提醒；单项失败不影响其它项。"""
     global _last_backup_date
     cfg = _raw_backup_config()
     now = datetime.now()
@@ -366,6 +446,7 @@ def _tick() -> None:
         except Exception as exc:
             log.warning("backup.scheduled_create_failed", error=type(exc).__name__)
 
+    # 临近出发提醒（出发当天由「每日提醒」负责，避免同一天重复发送）
     try:
         from app.db.session import get_session
         from app.services import mail_service, weather_service
@@ -376,7 +457,7 @@ def _tick() -> None:
                 try:
                     city = str(trip.get("destination") or "")
                     weather = weather_service.fetch_weather(city, db=session) if city else None
-                    advice = "\n".join((weather or {}).get("advice_hints") or []) or "出行前请关注天气变化，备好随身物品。"
+                    advice = mail_service.build_default_advice(weather)
                     mail_service.send_weather_advice(session, trip, advice=advice, weather=weather)
                 except Exception as exc:
                     log.warning("backup.advice_dispatch_failed", error=type(exc).__name__)
@@ -387,6 +468,12 @@ def _tick() -> None:
                 log.warning("backup.advice_session_close_failed")
     except Exception as exc:
         log.warning("backup.advice_tick_failed", error=type(exc).__name__)
+
+    # 在途行程每日早晨天气邮件
+    try:
+        run_daily_weather_reminders(now)
+    except Exception as exc:
+        log.warning("backup.daily_reminder_tick_failed", error=type(exc).__name__)
 
 
 def _scheduler_loop() -> None:

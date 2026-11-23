@@ -11,8 +11,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 import json as _json
@@ -26,6 +26,7 @@ from app.core.security import new_id
 from app.models.attachment import Attachment
 from app.models.moment import Moment
 from app.models.trip import Trip
+from app.services import storage_service
 from app.services.slug import trip_folder_name
 from app.services.sync_service import emit, row_to_dict
 
@@ -154,23 +155,38 @@ async def upload(request: Request, file: UploadFile = File(...),
     data = await file.read(_MAX_SIZE + 1)
     _validate_file(mime=file.content_type, ext=Path(safe_name).suffix,
                    kind=kind, size=len(data))
-    folder = _resolve_folder(db, trip_id)
-    path = folder / f"{new_id()}_{safe_name}"
-    path.write_bytes(data)
+    backend = storage_service.active_backend()
+    folder = _resolve_folder(db, trip_id)  # 复用稳定的行程文件夹名（对象存储时作为对象键前缀）
+    stored_name = f"{new_id()}_{safe_name}"
+    access_url: str | None = None
+    if backend == "local":
+        # 本地后端行为完全不变：直接写入 data_dir()/uploads 下的行程目录
+        path = folder / stored_name
+        path.write_bytes(data)
+        storage_path = str(path)
+    else:
+        # 对象存储后端：上传到远端，storage_path 存对象键，返回可直接访问的 URL
+        key = storage_service.object_key(folder.name, stored_name)
+        storage_service.put_bytes(backend, key, data, file.content_type)
+        storage_path = key
+        access_url = storage_service.direct_url(backend, key)
 
     attachment = Attachment(
         trip_id=trip_id,
         uploader_id=getattr(user, "id", None),
         filename=safe_name,
-        storage_path=str(path),
+        storage_path=storage_path,
         mime=file.content_type,
         size=len(data),
         checksum=hashlib.sha256(data).hexdigest(),
         kind=kind,
+        backend=backend,
     )
     db.add(attachment)
     db.commit()
     result = row_to_dict(attachment)
+    if access_url:
+        result["url"] = access_url
     emit(trip_id, "attachment.created", result, getattr(user, "id", None))
     return ok(result, request_id=_rid(request))
 
@@ -203,8 +219,29 @@ def download(attachment_id: str, request: Request, db: Session = Depends(get_db)
     # 登录用户按既有权限体系访问；未登录仅放行公开瞬间引用的图片
     if user is None and not _public_moment_media(db, attachment_id):
         raise AppError(ErrorCode.UNAUTHORIZED, "请先登录后再查看该附件")
+    backend = attachment.backend or "local"
+    if backend != "local":
+        # 对象存储模式：302 重定向到公有直链或预签名 URL，不再经后端代理文件流
+        url = storage_service.direct_url(backend, attachment.storage_path)
+        return RedirectResponse(url, status_code=302)
     path = Path(attachment.storage_path)
     if not path.is_file():
         raise AppError(ErrorCode.NOT_FOUND, "附件文件已丢失")
     return FileResponse(path, filename=attachment.filename,
                         media_type=attachment.mime or "application/octet-stream")
+
+
+# ---------------------------------------------------------------- 存储设置
+
+@router.get("/settings/storage")
+def get_storage_settings(request: Request,
+                         user: Any = Depends(require_permission("trip:settings"))):
+    """对象存储配置（脱敏：密钥字段仅返回 has_* 布尔）。"""
+    return ok(storage_service.get_storage_config(), request_id=_rid(request))
+
+
+@router.put("/settings/storage")
+def put_storage_settings(request: Request, payload: dict = Body(default={}),
+                         user: Any = Depends(require_permission("trip:settings"))):
+    """保存存储后端与凭据：明文密钥加密落盘，留空保留旧密文。"""
+    return ok(storage_service.save_storage_config(payload or {}), request_id=_rid(request))

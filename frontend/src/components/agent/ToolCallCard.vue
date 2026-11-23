@@ -35,7 +35,7 @@ const statusLabel: Record<string, string> = {
     <div class="flex items-center gap-1.5">
       <Wrench class="h-3.5 w-3.5 shrink-0 text-primary" />
       <span class="font-medium text-foreground">{{ label }}</span>
-      <code class="truncate text-[10px] text-muted-foreground">{{ call.name }}</code>
+      <code class="truncate text-[10px] text-muted-foreground">{{ Object.keys(call.arguments ?? {}).length }} 项参数</code>
       <Badge
         class="ml-auto shrink-0"
         :variant="call.status === 'done' ? 'default' : call.status === 'cancelled' || call.status === 'error' ? 'destructive' : 'secondary'"

@@ -1,20 +1,77 @@
-# 最小单镜像示例：不启动任何数据库容器，SQLite 数据落在命名卷。
+# 瞬旅 FlashTrip compose 用法：
+#   默认（单镜像 + SQLite + 文档站）：docker compose up -d
+#   完整栈（PostgreSQL + Redis）：    docker compose --profile full up -d
+#
+# 完整栈示例（应用连接串通过环境变量注入，也可以写进同目录 .env）：
+#   FLASHTRIP_DATABASE_URL="postgresql+psycopg://flashtrip:flashtrip@postgres:5432/flashtrip" \
+#   FLASHTRIP_REDIS_URL="redis://redis:6379/0" \
+#   docker compose --profile full up -d
+#
+# 可用变量（均可用 .env 或命令行注入）：
+#   FLASHTRIP_SECRET_KEY  主密钥（首次生成后必须长期保存，更新沿用）
+#   FLASHTRIP_PORT        容器内监听端口，默认 8000（宿主端口同步映射）
+#   TZ                    时区，默认 Asia/Shanghai
+#   POSTGRES_PASSWORD     完整栈 PostgreSQL 密码，默认 flashtrip（仅 full profile）
+#
+# 文档站随镜像发布：http://<主机>:<端口>/FlashTrip/
 services:
   flashtrip:
+    # 本地构建改为：build: { context: ., args: { NPM_REGISTRY: "" } }
     image: ghcr.io/sunny-335/flashtrip:latest
-    # 本地构建时改为：build: { context: ., args: {} }
     container_name: flashtrip
-    # 容器内默认监听 8000。只换对外端口：改为 "6781:8000"；
-    # 容器内也要改：加 environment 的 FLASHTRIP_PORT: 6781 并用 "6781:6781"。
+    # 容器内默认监听 8000；改端口时两处同步为同一变量即可
     ports:
-      - "8000:8000"
+      - "${FLASHTRIP_PORT:-8000}:${FLASHTRIP_PORT:-8000}"
     volumes:
       - flashtrip-data:/data
     environment:
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
       FLASHTRIP_LOG_LEVEL: INFO
-      # FLASHTRIP_SECRET_KEY: "请备份；留空则由安装向导生成"
+      # 留空 = SQLite（默认）；完整栈时注入 postgresql+psycopg://… 连接串
+      FLASHTRIP_SECRET_KEY: ${FLASHTRIP_SECRET_KEY:-}
+      FLASHTRIP_PORT: ${FLASHTRIP_PORT:-8000}
+      FLASHTRIP_DATABASE_URL: ${FLASHTRIP_DATABASE_URL:-}
+      FLASHTRIP_REDIS_URL: ${FLASHTRIP_REDIS_URL:-}
+    # 健康检查已内置于镜像（curl /api/v1/health）
+    restart: unless-stopped
+    # 注意：不 depends_on postgres/redis —— 默认 SQLite 模式不应拉起它们；
+    # 完整栈首启若与数据库竞争，restart 策略会自动重试直至迁移成功。
+
+  # -------- 以下仅在 --profile full 时启动 --------
+  postgres:
+    profiles: ["full"]
+    image: postgres:17-alpine
+    container_name: flashtrip-postgres
+    environment:
+      POSTGRES_USER: flashtrip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flashtrip}
+      POSTGRES_DB: flashtrip
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - flashtrip-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashtrip -d flashtrip"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    profiles: ["full"]
+    image: redis:7-alpine
+    container_name: flashtrip-redis
+    volumes:
+      - flashtrip-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
 volumes:
   flashtrip-data:
+  flashtrip-pg:
+  flashtrip-redis:

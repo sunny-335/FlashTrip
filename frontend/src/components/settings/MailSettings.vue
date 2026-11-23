@@ -6,6 +6,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { Mail, Save, Loader2, Send, RefreshCw } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
+import { useToastStore } from '@/stores/toast'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -22,6 +23,7 @@ interface MailConfig {
   use_tls: boolean
   timeout_s: number
   default_recipients: string[]
+  test_recipients: string[]
   has_password: boolean
 }
 interface MailTemplate { name: string; label: string; description: string }
@@ -47,24 +49,19 @@ const form = reactive({
   use_tls: false,
   timeout_s: 10,
   recipientsText: '',
+  testRecipientsText: '',
 })
 const hasPassword = ref(false)
 const templates = ref<MailTemplate[]>([])
 const logs = ref<MailLog[]>([])
 const loading = ref(true)
+const ready = ref(false)
 const saving = ref(false)
 const testing = ref(false)
-const testResult = ref('')
-const testOk = ref<boolean | null>(null)
-const notice = ref('')
-const error = ref('')
+const toast = useToastStore()
 
 function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
-}
-function flash(text: string) {
-  notice.value = text
-  window.setTimeout(() => { notice.value = '' }, 2600)
 }
 function parseRecipients(text: string): string[] {
   return text.split(/[,，;；\n\s]+/).map((s) => s.trim()).filter(Boolean)
@@ -82,12 +79,12 @@ function buildPayload() {
     use_tls: form.use_tls,
     timeout_s: Number(form.timeout_s) || 10,
     default_recipients: parseRecipients(form.recipientsText),
+    test_recipients: parseRecipients(form.testRecipientsText),
   }
 }
 
 async function load() {
   loading.value = true
-  error.value = ''
   try {
     const [cfg, tpl, logList] = await Promise.all([
       api.get<MailConfig>('/mail/config'),
@@ -104,28 +101,29 @@ async function load() {
     form.use_tls = Boolean(cfg.use_tls)
     form.timeout_s = cfg.timeout_s || 10
     form.recipientsText = (cfg.default_recipients || []).join('\n')
+    form.testRecipientsText = (cfg.test_recipients || []).join('\n')
     form.password = ''
     hasPassword.value = Boolean(cfg.has_password)
     templates.value = tpl
     logs.value = logList
+    ready.value = true
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     loading.value = false
   }
 }
 
 async function save() {
-  if (saving.value) return
+  if (saving.value || !ready.value) return
   saving.value = true
-  error.value = ''
   try {
     await api.put('/mail/config', buildPayload())
     form.password = ''
-    flash('邮件配置已保存')
+    useToastStore().success('邮件配置已保存')
     await load()
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     saving.value = false
   }
@@ -133,17 +131,15 @@ async function save() {
 
 /** 以当前表单作为临时配置直接测试，无需先保存。 */
 async function sendTest() {
-  if (testing.value) return
+  if (testing.value || !ready.value) return
   testing.value = true
-  testOk.value = null
-  testResult.value = ''
   try {
     const res = await api.post<{ ok: boolean; message: string }>('/mail/test', buildPayload())
-    testOk.value = res.ok
-    testResult.value = res.message || (res.ok ? '测试邮件已发送' : '测试邮件发送失败')
+    const message = res.message || (res.ok ? '测试邮件已发送' : '测试邮件发送失败')
+    if (res.ok) toast.success(message)
+    else toast.error(message)
   } catch (e) {
-    testOk.value = false
-    testResult.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     testing.value = false
     await loadLogs()
@@ -151,7 +147,11 @@ async function sendTest() {
 }
 
 async function loadLogs() {
-  logs.value = await api.get<MailLog[]>('/mail/logs?limit=50').catch(() => [])
+  try {
+    logs.value = await api.get<MailLog[]>('/mail/logs?limit=50')
+  } catch (e) {
+    toast.error(messageOf(e))
+  }
 }
 
 function templateLabel(name: string): string {
@@ -168,8 +168,6 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-xs text-destructive">{{ error }}</p>
-    <p v-if="notice" class="rounded-md border border-primary/40 bg-accent px-2.5 py-2 text-xs text-accent-foreground">{{ notice }}</p>
 
     <!-- SMTP 配置 -->
     <Card class="space-y-3">
@@ -182,13 +180,14 @@ onMounted(load)
             配置发信服务以发送出行提醒、协作邀请与分享通知。密码经加密后仅存于服务端，前端永不获取明文。
           </p>
         </div>
-        <Button size="sm" :disabled="saving || loading" @click="save">
+        <Button size="sm" :disabled="saving || loading || !ready" @click="save">
           <Loader2 v-if="saving" class="h-3.5 w-3.5 animate-spin" />
           <Save v-else class="h-3.5 w-3.5" /> 保存
         </Button>
       </div>
 
       <p v-if="loading" class="text-xs text-muted-foreground">正在读取邮件配置…</p>
+      <Button v-else-if="!ready" variant="outline" size="sm" @click="load">重新读取邮件配置</Button>
       <template v-else>
         <label class="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-sm text-foreground">
           <input v-model="form.enabled" type="checkbox" class="h-4 w-4 accent-[var(--primary)]" />
@@ -245,6 +244,10 @@ onMounted(load)
               SSL 与 STARTTLS 通常二选一；同时启用时优先使用 SSL。
             </p>
           </div>
+          <div class="space-y-1 sm:col-span-2">
+            <label class="text-[11px] text-muted-foreground">测试邮件收件人（留空则使用默认收件人）</label>
+            <textarea v-model="form.testRecipientsText" rows="2" class="flex w-full rounded-lg border border-input bg-card px-3 py-2 text-sm text-foreground shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring" placeholder="指定测试邮件接收邮箱" />
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center gap-2 border-t border-border pt-3">
@@ -252,8 +255,7 @@ onMounted(load)
             <Loader2 v-if="testing" class="h-3.5 w-3.5 animate-spin" />
             <Send v-else class="h-3.5 w-3.5" /> 发送测试邮件
           </Button>
-          <span v-if="testResult" class="text-xs" :class="testOk ? 'text-primary' : 'text-destructive'">{{ testResult }}</span>
-          <span v-else class="text-[11px] text-muted-foreground">可直接用当前填写的内容测试，无需先保存。</span>
+          <span class="text-[11px] text-muted-foreground">可直接用当前填写的内容测试，无需先保存。</span>
         </div>
       </template>
     </Card>

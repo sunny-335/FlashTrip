@@ -35,9 +35,15 @@ _MAIL_DEFAULTS: dict[str, Any] = {
     "use_tls": False,
     "timeout_s": 10,
     "default_recipients": [],
+    # 测试邮件专用收件人；为空时回退到 default_recipients
+    "test_recipients": [],
 }
 
 TEMPLATE_NAMES = ("trip_weather_advice", "invite", "share", "test", "generic")
+
+# 在途行程每日提醒的日志标记：复用 trip_weather_advice 的视觉模板，
+# 但用独立 template 名做「同一行程同一天不重复发送」的去重依据。
+DAILY_TEMPLATE = "trip_weather_daily"
 
 TEMPLATE_META = (
     ("trip_weather_advice", "行程天气出行建议", "临近出发时汇总天气、穿衣与装备建议"),
@@ -91,14 +97,24 @@ def _shell(title: str, body: str) -> str:
 
 
 _ADVICE_BODY = (
-    "<p style=\"margin:0 0 16px;line-height:1.7;\">你好，旅程 <strong>{{trip_title}}</strong> "
-    "将于 {{start_date}} 出发，目的地 {{destination}}，请留意以下天气与出行建议。</p>"
-    "<div style=\"margin:0 0 18px;padding:14px 16px;background:#eff6ff;border-radius:10px;"
-    "font-size:14px;line-height:1.7;\"><strong>当前天气</strong><br>{{weather_summary}}</div>"
-    "<div style=\"padding:16px;background:#f9fafb;border-radius:10px;white-space:pre-wrap;"
-    "line-height:1.8;font-size:14px;\">{{advice}}</div>"
+    "<p style=\"margin:0 0 16px;line-height:1.7;color:#374151;\">你好，旅程 "
+    "<strong>{{trip_title}}</strong>（{{start_date}} 至 {{end_date}}）目的地 "
+    "<strong>{{destination}}</strong>，以下为天气概况与出行建议。</p>"
+    # 天气概况卡片
+    "<div style=\"margin:0 0 18px;border:1px solid #dbeafe;border-radius:12px;overflow:hidden;\">"
+    "<div style=\"background:#eff6ff;padding:10px 16px;font-weight:700;color:#1e40af;font-size:14px;\">"
+    "天气概况</div>"
+    "<div style=\"padding:14px 16px;\">{{weather_summary_html}}</div></div>"
+    # 逐日天气列表
+    "<div style=\"margin:0 0 18px;\">"
+    "<div style=\"font-weight:700;font-size:15px;margin:0 0 8px;color:#111827;\">逐日天气</div>"
+    "{{forecast_html}}</div>"
+    # 出行建议（Markdown 渲染为 HTML）
+    "<div style=\"margin:0 0 18px;\">"
+    "<div style=\"font-weight:700;font-size:15px;margin:0 0 8px;color:#111827;\">出行建议</div>"
+    "<div style=\"padding:14px 16px;background:#f9fafb;border-radius:10px;\">{{advice_html}}</div></div>"
     "<p style=\"margin:18px 0 0;color:#6b7280;font-size:13px;line-height:1.7;\">"
-    "祝旅途顺利，记得根据天气增减衣物、备好雨具与随身药品。</p>"
+    "祝旅途顺利，请根据天气增减衣物、备好雨具与随身药品。</p>"
 )
 
 _INVITE_BODY = (
@@ -140,14 +156,84 @@ _TEMPLATES = {
     "generic": _shell("{{title}}", _GENERIC_BODY),
 }
 
+# 这些上下文键的值是「已由后端安全生成」的 HTML，注入时不再二次转义；
+# 其内容在生成时已对用户数据做过 html 转义，故不会引入 XSS。
+_RAW_CONTEXT_KEYS = frozenset({"weather_summary_html", "forecast_html", "advice_html"})
+
+
+def _md_inline(text: str) -> str:
+    """行内 Markdown：先转义 HTML，再把 **加粗** 还原为 <strong>。"""
+    escaped = html_lib.escape(str(text or ""), quote=False)
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+
+
+def markdown_to_html(text: str) -> str:
+    """极简 Markdown → HTML：支持标题、有序/无序列表、加粗与段落。
+
+    零第三方依赖；输入先整体 HTML 转义，确保任何用户/模型文本都不会注入脚本。
+    """
+    blocks: list[str] = []
+    para: list[str] = []
+    items: list[str] = []
+
+    def flush_para() -> None:
+        nonlocal para
+        if para:
+            blocks.append(
+                '<p style="margin:0 0 8px;line-height:1.7;">' + "<br/>".join(para) + "</p>"
+            )
+            para = []
+
+    def flush_items() -> None:
+        nonlocal items
+        if items:
+            blocks.append(
+                '<ul style="margin:0 0 8px;padding-left:20px;line-height:1.75;">'
+                + "".join(f'<li style="margin:2px 0;">{it}</li>' for it in items)
+                + "</ul>"
+            )
+            items = []
+
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush_para()
+            flush_items()
+            continue
+        heading = re.match(r"^#{1,6}\s+(.+)$", line)
+        if heading:
+            flush_para()
+            flush_items()
+            blocks.append(
+                '<h3 style="font-size:14px;margin:12px 0 6px;color:#111827;">'
+                + _md_inline(heading.group(1)) + "</h3>"
+            )
+            continue
+        bullet = re.match(r"^(?:[-*•]|\d+[.、)])\s+(.+)$", line)
+        if bullet:
+            flush_para()
+            items.append(_md_inline(bullet.group(1)))
+            continue
+        flush_items()
+        para.append(_md_inline(line))
+
+    flush_para()
+    flush_items()
+    return "".join(blocks) or '<p style="margin:0;color:#6b7280;">暂无出行建议。</p>'
+
 
 def render_template(name: str, context: dict) -> str:
-    """渲染 {{变量名}} 占位；变量缺失用中文默认值，绝不抛异常。"""
+    """渲染 {{变量名}} 占位；变量缺失用中文默认值，绝不抛异常。
+
+    `*_html` 专用键为后端生成的可信 HTML，注入时不再转义；其余变量一律转义。
+    """
     body = _TEMPLATES.get(name) or _TEMPLATES["generic"]
     ctx = {key: value for key, value in (context or {}).items() if value is not None}
 
     def _replace(match: re.Match) -> str:
         key = match.group(1)
+        if key in _RAW_CONTEXT_KEYS:
+            return str(ctx.get(key, "") or "")
         value = ctx.get(key, _DEFAULT_CONTEXT.get(key, ""))
         return html_lib.escape(str(value), quote=True)
 
@@ -334,8 +420,25 @@ def send_mail(to_addr: str, subject: str, html: str, *, text: str = "", template
     return {"ok": False, "error": error}
 
 
+def _test_recipients(cfg: dict) -> list[str]:
+    """测试邮件收件人：配置了 test_recipients 就只用它，否则回退 default_recipients。"""
+    source = cfg.get("test_recipients") or cfg.get("default_recipients") or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for addr in source:
+        email = str(addr or "").strip()
+        if email and email.lower() not in seen:
+            seen.add(email.lower())
+            out.append(email)
+    return out
+
+
 def test_mail(override: dict | None = None) -> dict:
-    """实际连 SMTP 发一封测试信；任何异常都转成 {"ok": False, "message": ...}。"""
+    """实际连 SMTP 发一封测试信；任何异常都转成 {"ok": False, "message": ...}。
+
+    收件人一律取配置的收件人列表（test_recipients / default_recipients），
+    绝不退化为发给发件人自己——否则测试信会回到系统发件箱，无法验证收信链路。
+    """
     try:
         cfg: dict[str, Any] = dict(_MAIL_DEFAULTS)
         cfg.update(_raw_mail_config())
@@ -347,17 +450,22 @@ def test_mail(override: dict | None = None) -> dict:
                 cfg[key] = value
         if not str(cfg.get("host") or "").strip():
             return {"ok": False, "message": "未配置 SMTP 主机，无法发送测试邮件"}
-        recipients = cfg.get("default_recipients") or []
-        to_addr = str(cfg.get("from_addr") or cfg.get("user") or (recipients[0] if recipients else ""))
-        if not to_addr:
-            return {"ok": False, "message": "未配置收件地址（from_addr 或 user）"}
+        recipients = _test_recipients(cfg)
+        if not recipients:
+            return {
+                "ok": False,
+                "message": "未配置收件人，请先在邮件设置中填写默认收件人或测试收件人后再试",
+            }
         html_body = render_template("test", {
             "app_name": cfg.get("from_name"),
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
-        msg = _build_message(cfg, to_addr=to_addr, subject="瞬旅 FlashTrip 测试邮件", html_body=html_body)
-        _smtp_send(cfg, [to_addr], msg)
-        return {"ok": True, "message": f"测试邮件已发送至 {to_addr}"}
+        msg = _build_message(
+            cfg, to_addr=", ".join(recipients),
+            subject="瞬旅 FlashTrip 测试邮件", html_body=html_body,
+        )
+        _smtp_send(cfg, recipients, msg)
+        return {"ok": True, "message": f"测试邮件已发送至 {', '.join(recipients)}", "recipients": recipients}
     except Exception as exc:
         return {"ok": False, "message": f"测试邮件发送失败：{type(exc).__name__}"}
 
@@ -438,33 +546,125 @@ def list_logs(db, limit: int = 50) -> list[dict]:
         return []
 
 
-def send_weather_advice(db, trip: dict, *, advice: str, weather: dict | None = None) -> dict:
-    """给行程默认收件人发送天气建议，返回 {sent, failed}；任何失败都不抛。
+def _fmt_temp(value: Any) -> str:
+    """温度展示：数值 -> 26℃，缺失 -> —。"""
+    if isinstance(value, (int, float)):
+        return f"{value:.0f}℃"
+    return "—"
 
-    供 POST /trips/{trip_id}/weather-advice 与定时提醒共用。
-    """
-    trip_id = str(trip.get("trip_id") or trip.get("id") or "")
+
+def build_weather_summary_html(weather: dict | None) -> str:
+    """天气概况卡片：实况缺失时显示「暂无实况」，绝不显示 0℃/未知占位。"""
     current = (weather or {}).get("current") or {}
-    summary = (
-        f"{current.get('weather') or '暂无'}，{current.get('temperature', '--')}℃，"
-        f"湿度 {current.get('humidity', '--')}%，{current.get('wind') or '风力未知'}"
+    weather_text = html_lib.escape(str(current.get("weather") or "暂无实况"))
+    temp = _fmt_temp(current.get("temperature"))
+    humidity = current.get("humidity")
+    humidity_text = html_lib.escape(f"{humidity}%") if isinstance(humidity, (int, float)) else "—"
+    wind = html_lib.escape(str(current.get("wind") or "—"))
+    cells = [
+        ("天气", weather_text),
+        ("气温", temp),
+        ("湿度", humidity_text),
+        ("风力", wind),
+    ]
+    cell_html = "".join(
+        f'<div style="flex:1 1 45%;min-width:120px;padding:6px 0;">'
+        f'<div style="font-size:12px;color:#6b7280;">{label}</div>'
+        f'<div style="font-size:16px;font-weight:600;color:#111827;">{value}</div></div>'
+        for label, value in cells
     )
+    alerts = current.get("alerts") or []
+    alert_html = ""
+    if alerts:
+        alert_html = (
+            '<div style="margin-top:8px;padding:8px 12px;background:#fef2f2;border-radius:8px;'
+            'color:#b91c1c;font-size:13px;line-height:1.6;">气象预警：'
+            + "；".join(html_lib.escape(str(a)) for a in alerts[:3]) + "</div>"
+        )
+    return f'<div style="display:flex;flex-wrap:wrap;gap:4px 20px;">{cell_html}</div>{alert_html}'
+
+
+def build_forecast_html(weather: dict | None) -> str:
+    """逐日天气预报列表（HTML），无数据时给出友好提示。"""
+    rows: list[str] = []
+    for item in (weather or {}).get("forecast") or []:
+        date = html_lib.escape(str(item.get("date") or ""))
+        week = html_lib.escape(str(item.get("week") or ""))
+        day = html_lib.escape(str(item.get("weather_day") or "—"))
+        night = html_lib.escape(str(item.get("weather_night") or "—"))
+        tmin, tmax = item.get("temp_min"), item.get("temp_max")
+        temp = (
+            f"{tmin:.0f}~{tmax:.0f}℃"
+            if isinstance(tmin, (int, float)) and isinstance(tmax, (int, float))
+            else "—"
+        )
+        pop = item.get("pop")
+        pop_text = f"，降水概率 {min(100, round(float(pop) * 100))}%" if isinstance(pop, (int, float)) and pop > 0 else ""
+        rows.append(
+            f'<li style="margin:4px 0;line-height:1.6;">{date} {week}：'
+            f'白天{day}，夜间{night}，{temp}{pop_text}</li>'
+        )
+    if not rows:
+        return '<p style="margin:0;color:#6b7280;line-height:1.7;">暂无逐日预报数据。</p>'
+    return f'<ul style="margin:0;padding-left:20px;line-height:1.75;color:#374151;">{"".join(rows)}</ul>'
+
+
+def build_default_advice(weather: dict | None) -> str:
+    """基于天气生成 Markdown 文本建议（AI 不可用时/定时提醒使用的确定性兜底）。"""
+    weather = weather or {}
+    current = weather.get("current") or {}
+    hints = weather.get("advice_hints") or []
+    lines: list[str] = []
+    weather_text = current.get("weather")
+    temp = current.get("temperature")
+    if weather_text or isinstance(temp, (int, float)):
+        parts = []
+        if weather_text:
+            parts.append(str(weather_text))
+        if isinstance(temp, (int, float)):
+            parts.append(f"{temp:.0f}℃")
+        lines.append("## 今日天气")
+        lines.append("- " + "，".join(parts))
+    if hints:
+        lines.append("## 出行建议")
+        lines.extend(f"- {hint}" for hint in hints)
+    if not lines:
+        lines.append("暂无天气数据，请稍后重试或检查天气服务配置。")
+    return "\n".join(lines)
+
+
+def build_advice_email(trip: dict, advice: str, weather: dict | None,
+                       *, subject: str | None = None) -> tuple[str, str]:
+    """组装出行建议邮件 (subject, html)：结构化分区 + Markdown 渲染。"""
+    trip = trip or {}
+    title = trip.get("title") or "我的行程"
     context = {
-        "trip_title": trip.get("title") or "我的行程",
+        "trip_title": title,
         "destination": trip.get("destination") or "目的地",
         "start_date": trip.get("start_date") or "近期",
         "end_date": trip.get("end_date") or "待定",
-        "weather_summary": summary,
-        "advice": advice or "",
+        "weather_summary_html": build_weather_summary_html(weather),
+        "forecast_html": build_forecast_html(weather),
+        "advice_html": markdown_to_html(advice),
     }
     html_body = render_template("trip_weather_advice", context)
-    subject = f"【出行提醒】{context['trip_title']} · 天气与装备建议"
+    return subject or f"【出行提醒】{title} · 天气与装备建议", html_body
+
+
+def send_weather_advice(db, trip: dict, *, advice: str, weather: dict | None = None,
+                        template: str = "trip_weather_advice", subject: str | None = None) -> dict:
+    """给行程默认收件人发送天气建议，返回 {sent, failed}；任何失败都不抛。
+
+    供显式发送端点与定时提醒共用；预览端点不得调用本函数（预览需纯读）。
+    """
+    trip_id = str(trip.get("trip_id") or trip.get("id") or "")
+    subject, html_body = build_advice_email(trip, advice or "", weather, subject=subject)
 
     sent = 0
     failed = 0
     for addr in get_default_recipients(db, trip_id):
         try:
-            result = send_mail(addr, subject, html_body, template="trip_weather_advice",
+            result = send_mail(addr, subject, html_body, template=template,
                                trip_id=trip_id or None, db=db)
             if result.get("ok"):
                 sent += 1
@@ -475,3 +675,24 @@ def send_weather_advice(db, trip: dict, *, advice: str, weather: dict | None = N
             log.warning("mail.advice_send_failed", error=type(exc).__name__)
             failed += 1
     return {"sent": sent, "failed": failed}
+
+
+def daily_reminder_sent(db, trip_id: str, day_iso: str) -> bool:
+    """判断某行程当日是否已发送过每日提醒（记录去重，同日不重复打扰）。"""
+    if not trip_id or not day_iso:
+        return False
+    try:
+        return (
+            db.query(MailLog)
+            .filter(
+                MailLog.trip_id == trip_id,
+                MailLog.template == DAILY_TEMPLATE,
+                MailLog.status == "sent",
+                MailLog.subject.like(f"%{day_iso}%"),
+            )
+            .first()
+            is not None
+        )
+    except Exception as exc:
+        log.warning("mail.daily_dedup_check_failed", error=type(exc).__name__)
+        return False

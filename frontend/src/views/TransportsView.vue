@@ -56,7 +56,7 @@ const planOptions = ref<PlanOptions>({ days: [], items: [] })
 const dayFilter = ref('')
 
 const modeOptions = [
-  { value: 'flight', label: '飞机' }, { value: 'train', label: '火车' },
+  { value: 'flight', label: '飞机' }, { value: 'train', label: '火车 / 高铁' },
   { value: 'car', label: '自驾' }, { value: 'bus', label: '大巴' },
   { value: 'ferry', label: '轮渡' }, { value: 'walk', label: '步行' },
   { value: 'other', label: '其他' },

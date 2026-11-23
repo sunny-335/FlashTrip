@@ -51,6 +51,35 @@ def test_create_backup_contains_config_and_db(isolated):
         assert any(name.startswith("db/") for name in names)
 
 
+def test_create_is_separate_from_download(isolated):
+    """立即备份只创建文件，不回传字节；下载必须走按 id 的独立路径。"""
+    info = bs.create_backup()
+    # create 的返回里不含任何文件内容字段
+    assert all(not isinstance(v, (bytes, bytearray)) for v in info.values())
+
+    filename, data = bs.get_backup_bytes_by_id(info["id"])
+    assert filename == info["filename"]
+    assert data[:2] == b"PK"  # 合法 zip 魔数
+    assert len(data) == info["size"]
+
+
+def test_get_backup_bytes_by_filename(isolated):
+    info = bs.create_backup()
+    data = bs.get_backup_bytes(info["filename"])
+    assert len(data) == info["size"]
+
+
+def test_download_missing_backup_raises_404(isolated):
+    with pytest.raises(AppError) as exc:
+        bs.get_backup_bytes_by_id("not-exist-id")
+    assert exc.value.code == ErrorCode.BACKUP_FILE_MISSING
+    assert exc.value.status == 404
+
+    with pytest.raises(AppError) as exc2:
+        bs.get_backup_bytes("not-exist.zip")
+    assert exc2.value.code == ErrorCode.BACKUP_FILE_MISSING
+
+
 def test_import_roundtrip(isolated):
     info = bs.create_backup()
     data = (isolated / "backups" / info["filename"]).read_bytes()

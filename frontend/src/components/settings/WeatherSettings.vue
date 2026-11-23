@@ -7,6 +7,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { CloudSun, Save, Loader2, Search, ExternalLink } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
+import { useToastStore } from '@/stores/toast'
+import MarkdownText from '@/components/common/MarkdownText.vue'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -19,7 +21,11 @@ interface WeatherConfig {
   advice_days: number
   has_amap_key: boolean
   has_qweather_key: boolean
+  has_qweather_jwt: boolean
   has_uapi_key: boolean
+  qweather_host: string
+  daily_reminder_enabled: boolean
+  daily_reminder_time: string
 }
 interface WeatherProvider { id: string; label: string; needs_key: boolean }
 interface ProvidersResp { providers?: WeatherProvider[] }
@@ -61,28 +67,28 @@ const form = reactive({
   provider: 'uapis',
   amap_key: '',
   qweather_key: '',
+  qweather_jwt: '',
   uapi_key: '',
+  qweather_host: '',
+  daily_reminder_enabled: false,
+  daily_reminder_time: '07:30',
   cache_minutes: 60,
   advice_days: 1,
 })
 const providers = ref<WeatherProvider[]>(FALLBACK_PROVIDERS)
-const keyState = reactive({ amap: false, qweather: false, uapi: false })
+const keyState = reactive({ amap: false, qweather: false, qweatherJwt: false, uapi: false })
+const toast = useToastStore()
 const city = ref('')
 const forecast = ref<ForecastResult | null>(null)
 const loading = ref(true)
 const saving = ref(false)
 const querying = ref(false)
-const notice = ref('')
-const error = ref('')
+const ready = ref(false)
 
 const providerOptions = computed(() => providers.value.map((p) => ({ value: p.id, label: p.label })))
 
 function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
-}
-function flash(text: string) {
-  notice.value = text
-  window.setTimeout(() => { notice.value = '' }, 2600)
 }
 function popLabel(v: number): string {
   if (v === undefined || v === null || Number.isNaN(v)) return '—'
@@ -94,7 +100,6 @@ function tempLabel(v: number): string {
 
 async function load() {
   loading.value = true
-  error.value = ''
   try {
     const [cfg, providerResp] = await Promise.all([
       api.get<WeatherConfig>('/weather/config'),
@@ -102,44 +107,54 @@ async function load() {
     ])
     form.provider = cfg.provider || 'uapis'
     form.cache_minutes = cfg.cache_minutes || 60
-    form.advice_days = cfg.advice_days || 1
+    form.advice_days = cfg.advice_days ?? 1
+    form.qweather_host = cfg.qweather_host || ''
+    form.daily_reminder_enabled = Boolean(cfg.daily_reminder_enabled)
+    form.daily_reminder_time = cfg.daily_reminder_time || '07:30'
     form.amap_key = ''
     form.qweather_key = ''
+    form.qweather_jwt = ''
     form.uapi_key = ''
     keyState.amap = Boolean(cfg.has_amap_key)
     keyState.qweather = Boolean(cfg.has_qweather_key)
+    keyState.qweatherJwt = Boolean(cfg.has_qweather_jwt)
     keyState.uapi = Boolean(cfg.has_uapi_key)
     const list = Array.isArray(providerResp)
       ? providerResp
       : providerResp?.providers ?? []
     if (list.length) providers.value = list
+    ready.value = true
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     loading.value = false
   }
 }
 
 async function save() {
-  if (saving.value) return
+  if (saving.value || !ready.value) return
   saving.value = true
-  error.value = ''
   try {
     await api.put('/weather/config', {
       provider: form.provider,
       amap_key: form.amap_key,
       qweather_key: form.qweather_key,
+      qweather_jwt: form.qweather_jwt,
+      qweather_host: form.qweather_host.trim(),
+      daily_reminder_enabled: form.daily_reminder_enabled,
+      daily_reminder_time: form.daily_reminder_time,
       uapi_key: form.uapi_key,
       cache_minutes: Number(form.cache_minutes) || 60,
       advice_days: Number(form.advice_days) || 1,
     })
     form.amap_key = ''
     form.qweather_key = ''
+    form.qweather_jwt = ''
     form.uapi_key = ''
-    flash('天气配置已保存')
+    toast.success('天气配置已保存')
     await load()
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     saving.value = false
   }
@@ -148,7 +163,6 @@ async function save() {
 async function query() {
   if (!city.value.trim() || querying.value) return
   querying.value = true
-  error.value = ''
   forecast.value = null
   try {
     const params = new URLSearchParams({
@@ -158,7 +172,7 @@ async function query() {
     })
     forecast.value = await api.get<ForecastResult>(`/weather/forecast?${params.toString()}`)
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     querying.value = false
   }
@@ -169,8 +183,6 @@ onMounted(load)
 
 <template>
   <div class="space-y-4">
-    <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-xs text-destructive">{{ error }}</p>
-    <p v-if="notice" class="rounded-md border border-primary/40 bg-accent px-2.5 py-2 text-xs text-accent-foreground">{{ notice }}</p>
 
     <!-- 供应商与密钥 -->
     <Card class="space-y-3">
@@ -183,13 +195,14 @@ onMounted(load)
             选择天气数据来源并配置密钥。密钥加密存于服务端，输入框留空即保留已保存的密钥。
           </p>
         </div>
-        <Button size="sm" :disabled="saving || loading" @click="save">
+        <Button size="sm" :disabled="saving || loading || !ready" @click="save">
           <Loader2 v-if="saving" class="h-3.5 w-3.5 animate-spin" />
           <Save v-else class="h-3.5 w-3.5" /> 保存
         </Button>
       </div>
 
       <p v-if="loading" class="text-xs text-muted-foreground">正在读取天气配置…</p>
+      <Button v-else-if="!ready" variant="outline" size="sm" @click="load">重新读取配置</Button>
       <template v-else>
         <div class="grid gap-2 sm:grid-cols-2">
           <div class="space-y-1">
@@ -203,6 +216,31 @@ onMounted(load)
           <div class="space-y-1">
             <label class="text-[11px] text-muted-foreground">出行提醒提前天数</label>
             <Input v-model="form.advice_days" type="number" placeholder="1" />
+          </div>
+          <template v-if="form.provider === 'qweather'">
+            <div class="space-y-1">
+              <label class="text-[11px] text-muted-foreground">和风天气 API Host</label>
+              <Input v-model="form.qweather_host" placeholder="账号专属 Host 域名" />
+            </div>
+            <div class="space-y-1">
+              <label class="text-[11px] text-muted-foreground">和风 API Key</label>
+              <Input v-model="form.qweather_key" type="password" autocomplete="new-password" placeholder="留空保留原值" />
+              <p class="text-[10px] text-muted-foreground">{{ keyState.qweather ? '服务端已配置' : '尚未配置' }}</p>
+            </div>
+            <div class="space-y-1 sm:col-span-2">
+              <label class="text-[11px] text-muted-foreground">和风 JWT（可选替代凭据）</label>
+              <Input v-model="form.qweather_jwt" type="password" autocomplete="new-password" placeholder="留空保留原值" />
+              <p class="text-[10px] text-muted-foreground">{{ keyState.qweatherJwt ? '服务端已配置' : '尚未配置' }}</p>
+            </div>
+          </template>
+          <label class="flex items-center gap-2 text-xs sm:col-span-2">
+            <input v-model="form.daily_reminder_enabled" type="checkbox" class="h-3.5 w-3.5" />
+            启用旅行中的每日天气邮件提醒
+          </label>
+          <div v-if="form.daily_reminder_enabled" class="space-y-1 sm:col-span-2">
+            <label class="text-[11px] text-muted-foreground">发送时间（24 小时制）</label>
+            <Input v-model="form.daily_reminder_time" type="time" />
+            <p class="text-[10px] text-muted-foreground">发送给行程所有者、成员及邮件设置中的默认收件人。</p>
           </div>
         </div>
 
@@ -223,11 +261,6 @@ onMounted(load)
             <label class="text-[11px] text-muted-foreground">高德地图密钥</label>
             <Input v-model="form.amap_key" type="password" placeholder="留空保留原密钥" autocomplete="new-password" />
             <p class="text-[10px] text-muted-foreground">{{ keyState.amap ? '服务端已保存' : '尚未配置' }}</p>
-          </div>
-          <div class="space-y-1">
-            <label class="text-[11px] text-muted-foreground">和风天气密钥</label>
-            <Input v-model="form.qweather_key" type="password" placeholder="留空保留原密钥" autocomplete="new-password" />
-            <p class="text-[10px] text-muted-foreground">{{ keyState.qweather ? '服务端已保存' : '尚未配置' }}</p>
           </div>
           <div class="space-y-1">
             <label class="text-[11px] text-muted-foreground">UApi Pro 密钥（可选）</label>
@@ -281,9 +314,7 @@ onMounted(load)
 
         <div v-if="forecast.advice_hints?.length" class="rounded-lg border border-border bg-muted/40 p-3">
           <p class="mb-1 text-xs font-medium text-foreground">出行提示</p>
-          <ul class="space-y-0.5">
-            <li v-for="(h, i) in forecast.advice_hints" :key="i" class="text-[11px] leading-relaxed text-muted-foreground">· {{ h }}</li>
-          </ul>
+          <MarkdownText compact :source="forecast.advice_hints.map((hint) => `- ${hint}`).join('\n')" />
         </div>
       </template>
       <p v-else class="text-xs text-muted-foreground">输入城市后可查看当前天气与 7 天预报。</p>
@@ -294,7 +325,7 @@ onMounted(load)
       <h3 class="text-sm font-semibold text-foreground">生成并发送出行建议</h3>
       <p class="text-xs leading-relaxed text-muted-foreground">
         在行程详情页可一键生成并发送出行建议邮件：系统结合目的地天气、行程日期与随行人数，
-        生成中文的穿衣、雨具与装备建议，并发送给邮件配置中的默认收件人。此处的按钮由行程页提供。
+        生成中文的穿衣、雨具与装备建议，并发送给行程所有者、成员及邮件设置中的默认收件人。此处的按钮由行程页提供。
       </p>
     </Card>
   </div>

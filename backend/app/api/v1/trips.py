@@ -24,6 +24,7 @@ from app.schemas.trip import (
     TripUpdate,
     normalize_people,
 )
+from app.services import trip_duration_service
 
 router = APIRouter(tags=["trips"])
 
@@ -33,6 +34,13 @@ def _trip_or_404(db: Session, trip_id: str) -> Trip:
     if trip is None:
         raise AppError(ErrorCode.NOT_FOUND, "行程不存在")
     return trip
+
+
+def _trip_out(trip: Trip) -> dict:
+    """TripOut 序列化 + 派生行程天数（非 ORM 字段）。"""
+    data = dump(TripOut, trip)
+    data["duration_days"] = trip_duration_service.duration_days(trip.start_date, trip.end_date)
+    return data
 
 
 def _day_or_404(db: Session, trip_id: str, day_id: str) -> TripDay:
@@ -57,7 +65,7 @@ def list_trips(
     elif status == "active":
         query = query.filter(Trip.status.in_(("planned", "ongoing")))
     rows = query.order_by(Trip.start_date, Trip.created_at).all()
-    return ok(dump_many(TripOut, rows), request_id=getattr(request.state, "request_id", ""))
+    return ok([_trip_out(row) for row in rows], request_id=getattr(request.state, "request_id", ""))
 
 
 @router.post("/trips")
@@ -74,7 +82,7 @@ def create_trip(
     trip = Trip(id=new_id(), owner_id=user.id, **data)
     db.add(trip)
     db.commit()
-    return ok(dump(TripOut, trip), request_id=getattr(request.state, "request_id", ""))
+    return ok(_trip_out(trip), request_id=getattr(request.state, "request_id", ""))
 
 
 @router.get("/trips/{trip_id}")
@@ -85,7 +93,7 @@ def get_trip(
     user=Depends(require_permission("trip:read")),
 ):
     return ok(
-        dump(TripOut, _trip_or_404(db, trip_id)),
+        _trip_out(_trip_or_404(db, trip_id)),
         request_id=getattr(request.state, "request_id", ""),
     )
 
@@ -100,6 +108,11 @@ def update_trip(
 ):
     trip = _trip_or_404(db, trip_id)
     changes = payload.model_dump(exclude_unset=True)
+    # 天数联动参数不落库：duration_days 参与日期推算，confirm_shrink 仅控制缩短是否执行
+    duration_input = changes.pop("duration_days", None)
+    changes.pop("confirm_shrink", None)
+    date_keys = ("start_date", "end_date")
+
     # 用「合并后的最终值」校验，保证局部更新也满足人数/儿童数约束
     tc, cc = normalize_people(
         changes.get("traveler_count", trip.traveler_count),
@@ -108,10 +121,40 @@ def update_trip(
     )
     changes["traveler_count"] = tc
     changes["children_count"] = cc
+    # 先应用非日期字段（日期由联动服务统一处理）
     for key, value in changes.items():
+        if key in date_keys:
+            continue
         setattr(trip, key, value)
+
+    merged_dates = {key: value for key, value in changes.items() if key in date_keys}
+    if duration_input is not None:
+        merged_dates["duration_days"] = duration_input
+    need_duration = bool(merged_dates) or bool(payload.confirm_shrink)
+    if need_duration:
+        start, end, target_days = trip_duration_service.compute_date_range(trip, merged_dates)
+        result = trip_duration_service.apply_duration(
+            db,
+            trip,
+            start,
+            end,
+            target_days,
+            confirm_shrink=bool(payload.confirm_shrink),
+            user_id=getattr(user, "id", None),
+        )
+        if result.get("preview"):
+            # 预览不落库：回滚此前内存改动，待用户带 confirm_shrink=true 重放
+            db.rollback()
+            return ok(
+                {**_trip_out(_trip_or_404(db, trip_id)), "duration_change": result},
+                request_id=getattr(request.state, "request_id", ""),
+            )
+        return ok(
+            {**_trip_out(trip), "duration_change": result},
+            request_id=getattr(request.state, "request_id", ""),
+        )
     db.commit()
-    return ok(dump(TripOut, trip), request_id=getattr(request.state, "request_id", ""))
+    return ok(_trip_out(trip), request_id=getattr(request.state, "request_id", ""))
 
 
 @router.delete("/trips/{trip_id}")
@@ -143,7 +186,7 @@ def set_current_trip(
                 user_id=user.id,
                 current_trip_id=trip_id,
                 theme="light",
-                default_map_provider_id="openfreemap",
+                default_map_provider_id="amap",
                 ai_tools_enabled=False,
             )
         )
@@ -173,7 +216,7 @@ def trip_overview(
     geo = sum(1 for item in items if item.lng is not None and item.lat is not None)
     return ok(
         {
-            "trip": dump(TripOut, trip),
+            "trip": _trip_out(trip),
             "days_count": int(days_count),
             "item_count": len(items),
             "planned_count": planned,

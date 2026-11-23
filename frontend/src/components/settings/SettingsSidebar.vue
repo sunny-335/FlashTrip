@@ -4,7 +4,7 @@
  * 选中态为青绿左边框 + 浅底，不使用渐变；分组与图标在此内聚维护。
  */
 import {
-  Sun, Eye, Bot, MapPinned, CloudSun, Mail, ShieldCheck, Archive,
+  Sun, Eye, Bot, MapPinned, CloudSun, Mail, ShieldCheck, Archive, HardDrive, Users,
 } from 'lucide-vue-next'
 import type { Component } from 'vue'
 
@@ -27,6 +27,7 @@ const groups: SidebarGroup[] = [
     items: [
       { key: 'appearance', label: '外观', icon: Sun },
       { key: 'moments', label: '瞬间默认可见性', icon: Eye },
+      { key: 'people', label: '家庭与人员', icon: Users },
     ],
   },
   {
@@ -41,6 +42,7 @@ const groups: SidebarGroup[] = [
   {
     label: '账户与数据',
     items: [
+      { key: 'storage', label: '对象存储', icon: HardDrive },
       { key: 'account', label: '账户与安全', icon: ShieldCheck },
       { key: 'backup', label: '备份', icon: Archive },
     ],

@@ -3,7 +3,7 @@
  *  写工具二次确认，以及 GET /ai/tools 的全站可用操作清单（中文标签）。
  */
 import { computed, nextTick, onMounted, ref } from 'vue'
-import { Sparkles, Send, Square, RotateCcw, X, Bot, Plus, Wrench, ChevronDown } from 'lucide-vue-next'
+import { Sparkles, Send, Square, RotateCcw, X, Bot, Plus, Wrench, ChevronDown, Maximize2, Minimize2, Pencil, Trash2 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
@@ -42,6 +42,22 @@ const providers = ref<AiProvider[]>([])
 const modelOptions = ref<AiModel[]>([])
 const tools = ref<ToolsConfig | null>(null)
 const toolsOpen = ref(false)
+const fullscreen = ref(false)
+
+async function renameSelected() {
+  const id = agent.conversationId
+  const current = agent.conversations.find((item) => item.id === id)
+  if (!id || !current) return
+  const title = window.prompt('输入新的会话标题', current.title || '')
+  if (!title?.trim()) return
+  try { await agent.renameConversation(id, title.trim()) } catch (e) { configError.value = (e as Error).message }
+}
+
+async function deleteSelected() {
+  const id = agent.conversationId
+  if (!id || !window.confirm('确定删除当前会话及其历史记录吗？')) return
+  try { await agent.deleteConversation(id); conversationChoice.value = '' } catch (e) { configError.value = (e as Error).message }
+}
 
 const usableProviders = computed(() => providers.value.filter((p) => p.enabled && p.hasKey))
 
@@ -138,7 +154,7 @@ onMounted(() => {
 
 <template>
   <div class="flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-lg"
-       :class="compact ? 'h-full w-full' : 'h-[460px] w-[380px]'">
+       :class="fullscreen ? 'fixed inset-3 z-50 h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] rounded-xl' : compact ? 'h-full w-full' : 'h-[460px] w-[380px]'">
     <!-- 标题栏 -->
     <div class="flex items-center justify-between border-b border-border px-4 py-2.5">
       <div class="flex items-center gap-2 text-sm font-medium">
@@ -146,6 +162,9 @@ onMounted(() => {
         <span class="rounded bg-secondary px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">{{ scopeLabel }}</span>
       </div>
       <div class="flex items-center gap-1">
+        <button class="rounded-md p-1 text-muted-foreground hover:bg-muted" :title="fullscreen ? '退出全屏' : '全屏'" @click="fullscreen = !fullscreen">
+          <Minimize2 v-if="fullscreen" class="h-3.5 w-3.5" /><Maximize2 v-else class="h-3.5 w-3.5" />
+        </button>
         <button class="rounded-md p-1 text-muted-foreground hover:bg-muted" title="刷新会话列表" @click="agent.loadConversations()">
           <RotateCcw class="h-3.5 w-3.5" />
         </button>
@@ -169,6 +188,8 @@ onMounted(() => {
       <button class="inline-flex h-7 items-center gap-0.5 rounded-md border border-border px-2 text-muted-foreground hover:bg-muted" title="新建会话" @click="newChat">
         <Plus class="h-3 w-3" /> 新建
       </button>
+      <button v-if="agent.conversationId" class="inline-flex h-7 items-center gap-0.5 rounded-md border border-border px-2 text-muted-foreground hover:bg-muted" title="重命名当前会话" @click="renameSelected"><Pencil class="h-3 w-3" /></button>
+      <button v-if="agent.conversationId" class="inline-flex h-7 items-center gap-0.5 rounded-md border border-border px-2 text-destructive hover:bg-destructive/10" title="删除当前会话" @click="deleteSelected"><Trash2 class="h-3 w-3" /></button>
       <select
         v-model="selectedProvider"
         class="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-1.5 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -199,7 +220,7 @@ onMounted(() => {
     <div v-if="toolsOpen" class="max-h-40 space-y-1 overflow-y-auto border-b border-border bg-muted/30 px-3 py-2 text-[11px]">
       <p v-if="!tools" class="text-muted-foreground">正在读取可用操作…</p>
       <p v-else-if="!tools.tools.length" class="text-muted-foreground">暂无可用操作。</p>
-      <div v-for="t in tools.tools" :key="t.name" class="flex items-center gap-1.5 rounded-md bg-card px-2 py-1.5">
+      <div v-for="t in (tools?.tools ?? [])" :key="t.name" class="flex items-center gap-1.5 rounded-md bg-card px-2 py-1.5">
         <span class="shrink-0 font-medium text-foreground">{{ toolLabel(t.name) }}</span>
         <Badge class="shrink-0" :variant="t.write ? 'outline' : 'secondary'">{{ t.write ? '写入·需确认' : '只读' }}</Badge>
         <span v-if="!t.enabled" class="shrink-0 text-muted-foreground">已停用</span>

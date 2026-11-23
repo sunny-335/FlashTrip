@@ -94,6 +94,11 @@ def create_app() -> FastAPI:
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
+    # VitePress 文档站：/FlashTrip/ → static/docs；未构建文档时静默跳过。
+    from app.docs_mount import mount_docs
+
+    mount_docs(app)
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str, request: Request):  # noqa: ANN001
         if full_path == "api" or full_path.startswith("api/"):

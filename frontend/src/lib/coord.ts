@@ -1,9 +1,9 @@
 /** 坐标枢纽：业务坐标统一 WGS84 入库，渲染时按底图坐标系反向转换。 */
-import gcoord from 'gcoord'
+import gcoord, { type CRSTypes } from 'gcoord'
 
 export type CoordSystem = 'WGS84' | 'CGCS2000' | 'GCJ-02' | 'BD-09'
 
-const TO_GCOORD: Record<CoordSystem, string> = {
+const TO_GCOORD: Record<CoordSystem, CRSTypes> = {
   WGS84: gcoord.WGS84,
   CGCS2000: gcoord.WGS84, // 与 WGS84 椭球几乎一致，Web 精度可近似互换
   'GCJ-02': gcoord.GCJ02,

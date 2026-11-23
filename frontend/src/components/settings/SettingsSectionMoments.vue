@@ -3,31 +3,26 @@
 import { onMounted, ref } from 'vue'
 import { Eye, Save, Loader2 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
+import { useToastStore } from '@/stores/toast'
 import Card from '@/components/ui/Card.vue'
 import Button from '@/components/ui/Button.vue'
 
 const enabled = ref(false)
 const loading = ref(true)
 const saving = ref(false)
-const notice = ref('')
-const error = ref('')
+const toast = useToastStore()
 
 function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
 }
-function flash(text: string) {
-  notice.value = text
-  window.setTimeout(() => { notice.value = '' }, 2600)
-}
 
 async function load() {
   loading.value = true
-  error.value = ''
   try {
     const s = await api.get<{ moment_default_public?: boolean }>('/settings')
     enabled.value = Boolean(s.moment_default_public)
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     loading.value = false
   }
@@ -36,12 +31,11 @@ async function load() {
 async function save() {
   if (saving.value) return
   saving.value = true
-  error.value = ''
   try {
     await api.put('/settings', { moment_default_public: enabled.value })
-    flash('默认可见性已保存')
+    toast.success('默认可见性已保存')
   } catch (e) {
-    error.value = messageOf(e)
+    toast.error(messageOf(e))
   } finally {
     saving.value = false
   }
@@ -76,7 +70,5 @@ onMounted(load)
     </p>
 
     <p v-if="loading" class="text-xs text-muted-foreground">正在读取偏好…</p>
-    <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-2 text-xs text-destructive">{{ error }}</p>
-    <p v-if="notice" class="rounded-md border border-primary/40 bg-accent px-2.5 py-2 text-xs text-accent-foreground">{{ notice }}</p>
   </Card>
 </template>

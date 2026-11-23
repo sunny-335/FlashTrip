@@ -1,15 +1,20 @@
 """AI 工具注册表：只读工具默认可用，写工具必须前端二次确认 + 权限校验。
 
-- 只读：list_trips / get_plan / get_expenses / search_poi
-- 写类：add_plan_item / move_plan_item / create_booking，走与人工操作同一套
+- 只读：list_trips / get_plan / get_expenses / search_poi 等全站查询工具
+- 写类：add_plan_item / move_plan_item / create_booking 等，走与人工操作同一套
   app.api.v1.deps.require_permission 判定（owner/admin 或 TripMember + Permission）。
-- ai_tools_enabled=false 时任何 tool_call 一律返回 AI_TOOLS_DISABLED。
+- 开关语义（修正后）：
+  - ai.tools_enabled（/ai/tools/config 写入）：总开关，关闭则任何工具都不可用（2005）；
+  - security.ai_tools_enabled（安装向导写入，默认 False）：**写工具**开关，
+    关闭时只读工具照常可用，写工具一律返回 AI_TOOLS_DISABLED；
+  - ai.tool_overrides：单工具覆盖开关。
+  默认安装后只读工具即开即用，写工具需在向导/设置中显式开启。
 - tool_call 与 tool_result 均落 ai_audit_logs。
 """
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -182,18 +187,31 @@ def _cfg(cfg: dict | None) -> dict:
 
 
 def tools_enabled(cfg: dict | None = None) -> bool:
-    """整体开关：优先读向导写入的 security.ai_tools_enabled，设置页可整体关闭。"""
-    cfg = _cfg(cfg)
-    ai = cfg.get("ai") or {}
+    """总开关：只由 /ai/tools/config 写入的 ai.tools_enabled 控制，缺省开启。
+
+    历史上 security/preferences 段的 ai_tools_enabled 是安装向导的「写工具」开关，
+    现统一由 write_tools_enabled() 解释，不再一刀切关闭只读工具，
+    保证默认安装后 AI 只读工具即可用。
+    """
+    ai = (_cfg(cfg).get("ai") or {})
     if "tools_enabled" in ai:
         return bool(ai["tools_enabled"])
-    # 安装向导把总开关写在 security 段（权威位置）
-    security = cfg.get("security") or {}
-    if "ai_tools_enabled" in security:
-        return bool(security["ai_tools_enabled"])
-    prefs = cfg.get("preferences") or {}
-    if "ai_tools_enabled" in prefs:
-        return bool(prefs["ai_tools_enabled"])
+    return True
+
+
+def write_tools_enabled(cfg: dict | None = None) -> bool:
+    """写工具开关：总开关开启，且向导 security.ai_tools_enabled 为真。
+
+    配置里没有该键（旧安装/测试环境）时按开启处理以保持兼容；
+    新安装一律会写入该键（向导默认 False）。
+    """
+    cfg = _cfg(cfg)
+    if not tools_enabled(cfg):
+        return False
+    for section in ("security", "preferences"):
+        value = (cfg.get(section) or {}).get("ai_tools_enabled")
+        if value is not None:
+            return bool(value)
     return True
 
 
@@ -277,6 +295,7 @@ class ToolRegistry:
         return {
             "enabled": tools_enabled(cfg),
             "requiresConfirmation": True,
+            "writeEnabled": write_tools_enabled(cfg),
             "readTools": [n for n in READ_TOOLS if _tool_enabled(cfg, n)],
             "writeTools": [n for n in WRITE_TOOLS if _tool_enabled(cfg, n)],
             "tools": [
@@ -285,7 +304,8 @@ class ToolRegistry:
                     "description": spec["description"],
                     "write": spec["write"],
                     "permission": spec["permission"],
-                    "enabled": _tool_enabled(cfg, name) and tools_enabled(cfg),
+                    "enabled": _tool_enabled(cfg, name) and tools_enabled(cfg)
+                    and (not spec["write"] or write_tools_enabled(cfg)),
                 }
                 for name, spec in TOOL_DEFS.items()
             ],
@@ -316,9 +336,10 @@ class ToolRegistry:
         return ToolRegistry.config(cfg)
 
     def definitions(self) -> list[dict]:
-        """OpenAI tools 参数；工具整体关闭时返回空列表（模型不会产生 tool_call）。"""
+        """OpenAI tools 参数；总开关关闭返回空；写工具未开启时不提供给模型。"""
         if not tools_enabled(self.cfg):
             return []
+        writes_on = write_tools_enabled(self.cfg)
         return [
             {
                 "type": "function",
@@ -329,7 +350,7 @@ class ToolRegistry:
                 },
             }
             for name, spec in TOOL_DEFS.items()
-            if _tool_enabled(self.cfg, name)
+            if _tool_enabled(self.cfg, name) and (writes_on or not spec["write"])
         ]
 
     def _assert_permission(self, key: str) -> None:
@@ -352,6 +373,9 @@ class ToolRegistry:
             raise AppError(ErrorCode.VALIDATION, f"未知工具：{name}")
         if not _tool_enabled(self.cfg, name):
             raise AppError(ErrorCode.AI_TOOLS_DISABLED, f"工具 {name} 已被禁用")
+        if spec["write"] and not write_tools_enabled(self.cfg):
+            # 写工具受向导 security.ai_tools_enabled 控制：关闭时（含确认后）一律拒绝
+            raise AppError(ErrorCode.AI_TOOLS_DISABLED, "AI 写工具未开启：可在安装设置或工具设置中开启")
         args = arguments or {}
         if isinstance(args, str):
             try:
@@ -532,7 +556,7 @@ class ToolRegistry:
 
         # ------------------------------------------------ 全站写工具（真实 DB 副作用）
         if name == "delete_trip":
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from app.models.trip import Trip
 
@@ -550,7 +574,7 @@ class ToolRegistry:
             trip = db.get(Trip, target)
             if trip is None:
                 raise AppError(ErrorCode.NOT_FOUND, "行程不存在")
-            trip.deleted_at = datetime.now(timezone.utc)
+            trip.deleted_at = datetime.now(UTC)
             db.commit()
             return {"id": target, "deleted": True, "title": trip.title}
 

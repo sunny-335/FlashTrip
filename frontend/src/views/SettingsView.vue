@@ -7,27 +7,32 @@
 import { computed, onMounted, ref, type Component } from 'vue'
 import { Settings2 } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
+import { useToastStore } from '@/stores/toast'
 import SettingsSidebar from '@/components/settings/SettingsSidebar.vue'
 import SettingsSectionAppearance from '@/components/settings/SettingsSectionAppearance.vue'
 import SettingsSectionMoments from '@/components/settings/SettingsSectionMoments.vue'
 import SettingsSectionAi from '@/components/settings/SettingsSectionAi.vue'
 import SettingsSectionMap from '@/components/settings/SettingsSectionMap.vue'
 import SettingsSectionAccount from '@/components/settings/SettingsSectionAccount.vue'
+import StorageSettings from '@/components/settings/StorageSettings.vue'
+import PeopleSettings from '@/components/settings/PeopleSettings.vue'
 import MailSettings from '@/components/settings/MailSettings.vue'
 import WeatherSettings from '@/components/settings/WeatherSettings.vue'
 import BackupSettings from '@/components/settings/BackupSettings.vue'
 
+const toastStore = useToastStore()
 const active = ref('appearance')
 const version = ref('')
-const loadError = ref('')
 
 const componentsByKey: Record<string, Component> = {
   appearance: SettingsSectionAppearance,
   moments: SettingsSectionMoments,
+  people: PeopleSettings,
   ai: SettingsSectionAi,
   map: SettingsSectionMap,
   weather: WeatherSettings,
   mail: MailSettings,
+  storage: StorageSettings,
   account: SettingsSectionAccount,
   backup: BackupSettings,
 }
@@ -38,7 +43,7 @@ async function load() {
     const s = await api.get<{ version?: string }>('/settings')
     version.value = s.version || ''
   } catch (e) {
-    loadError.value = e instanceof ApiError ? e.message : '系统配置读取失败'
+    toastStore.error(e instanceof ApiError ? e.message : '系统配置读取失败')
   }
 }
 
@@ -46,7 +51,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1080px] px-5 py-6">
+  <div class="mx-auto max-w-[1080px] px-5 py-6 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]">
     <div class="mb-5">
       <h1 class="flex items-center gap-2 text-lg font-semibold text-foreground">
         <Settings2 class="h-5 w-5 text-primary" /> 设置
@@ -56,10 +61,6 @@ onMounted(load)
         <span v-if="version" class="ml-1 font-mono text-[10px]">v{{ version }}</span>
       </p>
     </div>
-
-    <p v-if="loadError" class="mb-4 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-      {{ loadError }}
-    </p>
 
     <div class="flex flex-col gap-5 lg:flex-row lg:gap-6">
       <SettingsSidebar :active="active" @select="active = $event" />

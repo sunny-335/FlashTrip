@@ -17,6 +17,7 @@ const { dnd, isMobile, openAdd } = usePlanContext()
 
 const editing = ref(false)
 const titleDraft = ref('')
+const dateDraft = ref(props.day.date ?? '')
 const localError = ref('')
 
 /** 可写计算属性：VueDraggable 的 v-model 直接写回 dnd.lists[day.id]。 */
@@ -42,12 +43,13 @@ function onEnd(evt: DragEndEvent) {
 
 function startEdit() {
   titleDraft.value = props.day.title ?? ''
+  dateDraft.value = props.day.date ?? ''
   editing.value = true
 }
 
 async function saveTitle() {
   try {
-    await dnd.updateDay(props.day.id, { title: titleDraft.value })
+    await dnd.updateDay(props.day.id, { title: titleDraft.value, date: dateDraft.value || null })
     editing.value = false
     localError.value = ''
   } catch (e) {
@@ -83,8 +85,9 @@ async function toggleCollapse() {
             <CloudSun class="h-3 w-3" /> {{ weather }}
           </span>
         </div>
-        <div v-if="editing" class="mt-1 flex items-center gap-1">
-          <Input v-model="titleDraft" class="h-7 text-xs" placeholder="当天标题" @keydown.enter="saveTitle" />
+        <div v-if="editing" class="mt-1 flex flex-wrap items-center gap-1">
+          <Input v-model="titleDraft" class="h-7 min-w-24 flex-1 text-xs" placeholder="当天标题" @keydown.enter="saveTitle" />
+          <Input v-model="dateDraft" type="date" class="h-7 w-36 text-xs" @keydown.enter="saveTitle" />
           <Button size="sm" class="h-7 px-2" @click="saveTitle">保存</Button>
           <Button variant="ghost" size="sm" class="h-7 px-2" @click="editing = false">取消</Button>
         </div>

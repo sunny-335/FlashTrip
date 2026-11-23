@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.security import new_id
@@ -34,6 +35,8 @@ class Trip(Base, TimestampMixin, SoftDeleteMixin):
     children_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     family_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     family_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 行程总预算：NULL 表示未设置预算；金额与本位币一致
+    total_budget: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
 
 
 class TripDay(Base, TimestampMixin, SoftDeleteMixin):

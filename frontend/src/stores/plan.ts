@@ -133,11 +133,18 @@ export interface AutoArrangeResult {
   items: { id: string; start_time: string | null; end_time: string | null; duration_min: number | null }[]
 }
 
-/** POST /weather-advice 的返回。 */
+/** 天气建议预览接口返回。 */
 export interface WeatherAdviceResult {
+  advice: string
+  weather?: unknown
+  subject?: string
+  preview_html?: string
+}
+
+export interface WeatherAdviceSendResult {
   sent: number
   failed: number
-  advice: string
+  advice?: string
 }
 
 function cloneItems(items: PlanItem[]): PlanItem[] {
@@ -267,9 +274,14 @@ export const usePlanStore = defineStore('plan', () => {
     return api.post<AutoArrangeResult>(`${base()}/auto-arrange`, { day_id: dayId, use_ai: useAi })
   }
 
-  /** 天气与出行建议：生成建议并发送邮件，返回发送概况与建议正文。 */
+  /** 仅生成天气与出行建议预览，不发送邮件。 */
   async function weatherAdvice(): Promise<WeatherAdviceResult> {
     return api.post<WeatherAdviceResult>(`/trips/${tripId.value}/weather-advice`)
+  }
+
+  /** 用户主动确认后才发送天气与出行建议邮件。 */
+  async function sendWeatherAdvice(): Promise<WeatherAdviceSendResult> {
+    return api.post<WeatherAdviceSendResult>(`/trips/${tripId.value}/weather-advice/send`)
   }
 
   async function addItem(payload: PlanItemCreate): Promise<PlanItem> {
@@ -369,7 +381,7 @@ export const usePlanStore = defineStore('plan', () => {
     conflicts, conflictIds, categories,
     allItems, plannedByDay,
     load, flush,
-    loadCategories, refreshConflicts, autoArrange, weatherAdvice,
+    loadCategories, refreshConflicts, autoArrange, weatherAdvice, sendWeatherAdvice,
     addItem, updateItem, deleteItem, importItems, move, undo, addDay, updateDay,
     findItem, insertLocal, removeLocal, replaceLocal, applyMovesLocal, snapshot, restore,
   }

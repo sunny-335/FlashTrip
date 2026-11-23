@@ -53,16 +53,16 @@ export function normalizeCoord(value?: string | null): CoordSystem {
 }
 
 /** 有 POI 搜索能力的国内供应商（后端 pick_provider 白名单）。 */
-export const POI_PROVIDER_IDS = ['amap', 'tianditu', 'baidu']
+export const POI_PROVIDER_IDS = ['amap', 'tianditu']
 
-/** 免密钥的兜底矢量 style（与后端预设 openfreemap-liberty 一致），保证任何情况下都能出图。 */
-export const DEFAULT_VECTOR_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty'
+/** 初始化兜底仅供短暂加载状态；正式地图必须使用服务端下发的合规 Provider 样式。 */
+export const DEFAULT_VECTOR_STYLE_URL = ''
 
 /**
  * 生成传给 new maplibregl.Map({ style }) / map.setStyle 的值：
  * - style.styleUrl 存在（OpenFreeMap 等矢量引用式）→ 必须直接返回该 URL 字符串，
  *   否则把「sources/layers 为空」的 style 对象交给 MapLibre 会得到一张空白地图；
- * - 高德 / 百度 / 天地图 / Mapbox（raster 代理式）→ 返回后端下发的 raster style 对象，
+ * - 高德 / 天地图（raster 代理式）→ 返回后端下发的 raster style 对象，
  *   瓦片已指向 /map/tiles/... 代理路径，URL 内不含密钥；
  * - 信息缺失时回退到免密钥矢量 style，避免空白。
  */

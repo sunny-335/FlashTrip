@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** POI 搜索：调 /map/poi/search?q=&provider=，结果已是 WGS84，点击后走真实新增 API 加入待规划池。
  *  紧凑单行输入框，结果以绝对定位浮层下拉展示，不铺满遮挡地图。
- *  后端 POI 供应商白名单仅 amap / tianditu / baidu，OpenFreeMap / Mapbox 不用于搜索。
+ *  后端 POI 供应商白名单仅高德 / 天地图；底图供应商不自动成为 POI 搜索源。
  */
 import { computed, ref } from 'vue'
 import { Search, Loader2, Plus, MapPin } from 'lucide-vue-next'
@@ -41,8 +41,7 @@ const searched = ref(false)
 
 /** 结果里的 provider 是供应商 id，展示时转成品牌名（品牌名保留原样）。 */
 const PROVIDER_LABEL: Record<string, string> = {
-  amap: '高德地图', tianditu: '天地图', baidu: '百度地图',
-  mapbox: 'Mapbox', openfreemap: 'OpenFreeMap',
+  amap: '高德地图', tianditu: '天地图',
 }
 
 const providerOptions = computed(() => [

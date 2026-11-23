@@ -1,14 +1,24 @@
-"""AI 对话 / 供应商 / 模型 / 工具配置 API。
+"""AI 对话 / 供应商 / 模型 / 工具配置 / 会话管理 API。
 
-POST /ai/chat 为 SSE 流（event: delta|tool_call|tool_result|done|error），
+POST /ai/chat 为 SSE 流（event: delta|tool_call|tool_result|done|error）：
+- delta：{delta, provider?, model?, notice?}，正文增量（文本形式工具调用已被拦截）；
+- tool_call：{toolCallId, name, arguments, needConfirm, permission?, confirmed?, unknown?}；
+- tool_result：{toolCallId, name, result}；
+- done：{conversationId, provider?, model?, content?, tool_calls?, stopped?,
+  pendingConfirmation?, toolCalls?}；
+- error：{code, message}。
 支持 Last-Event-ID 断线补发；写类工具必须由前端二次确认后回传
 confirmToolCalls 才会执行，执行时走与人工相同的 require_permission。
+会话支持自动标题（截断回退 + 异步低成本生成）、重命名（PATCH）、删除（DELETE）。
 """
 from __future__ import annotations
 
 import json
+import threading
 from collections import deque
-from typing import Any, Iterator
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import StreamingResponse
@@ -21,7 +31,9 @@ from app.core.response import ok
 from app.core.security import new_id
 from app.models.ai import AiConversation, AiMessage
 from app.services.ai.audit import record_message
-from app.services.ai.gateway import LLMGateway, sse, stop as stop_generation
+from app.services.ai.gateway import LLMGateway, sse
+from app.services.ai.gateway import stop as stop_generation
+from app.services.ai.prompts import SYSTEM_PROMPT, TITLE_SYSTEM_PROMPT
 from app.services.ai.providers import list_ai_providers, list_models, resolve_provider_configs
 from app.services.ai.tools import TOOL_DEFS, ToolRegistry
 from app.services.sync_service import row_to_dict
@@ -29,7 +41,9 @@ from app.services.sync_service import row_to_dict
 router = APIRouter(tags=["ai"])
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-_MAX_TOOL_ROUNDS = 2
+# 多轮工具循环上限：查询→整理→再查询→总结等链路需要 >2 轮
+_MAX_TOOL_ROUNDS = 6
+_DEFAULT_TITLE = "新对话"
 # 断线补发用：每会话最近事件日志（进程内，单进程拓扑）
 _EVENT_LOG: dict[str, deque] = {}
 _LAST_EVENT_ID: dict[str, int] = {}
@@ -53,7 +67,10 @@ def _replay(conversation_id: str, last_id: int) -> list[str]:
 
 
 def _messages(payload: dict) -> list[dict]:
-    """归一化消息数组；兼容旧前端悬浮按钮的扁平 {message: "..."} 载荷。"""
+    """归一化消息数组；兼容旧前端悬浮按钮的扁平 {message: "..."} 载荷。
+
+    客户端伪造的 system 消息一律丢弃：system 提示只能由服务端注入。
+    """
     raw = payload.get("messages")
     if not raw and isinstance(payload.get("message"), str) and payload["message"].strip():
         raw = [{"role": "user", "content": payload["message"]}]
@@ -61,8 +78,11 @@ def _messages(payload: dict) -> list[dict]:
     for item in raw or []:
         if not isinstance(item, dict):
             continue
+        role = str(item.get("role") or "user")
+        if role == "system":
+            continue
         message: dict[str, Any] = {
-            "role": str(item.get("role") or "user"),
+            "role": role,
             "content": item.get("content") or "",
         }
         if item.get("tool_call_id"):
@@ -104,11 +124,21 @@ def _context_hint(context: dict) -> dict | None:
     return {"role": "system", "content": "；".join(parts)}
 
 
+def _own_conversation(db: Session, conversation_id: str, user: Any) -> AiConversation | None:
+    """取属于当前用户且未删除的会话；不存在/越权一律返回 None。"""
+    conv = db.get(AiConversation, conversation_id)
+    if conv is None or conv.user_id != getattr(user, "id", None):
+        return None
+    if getattr(conv, "deleted_at", None) is not None:
+        return None
+    return conv
+
+
 def _ensure_conversation(db: Session, user: Any, payload: dict) -> AiConversation:
     conv_id = str(payload.get("conversation_id") or payload.get("conversationId") or "")
     if conv_id:
-        existing = db.get(AiConversation, conv_id)
-        if existing is not None and existing.user_id == getattr(user, "id", None):
+        existing = _own_conversation(db, conv_id, user)
+        if existing is not None:
             # 复用已有会话时合并最新页面上下文（tab 等），供后续轮次使用
             context = _context(payload)
             if context:
@@ -126,7 +156,7 @@ def _ensure_conversation(db: Session, user: Any, payload: dict) -> AiConversatio
         user_id=getattr(user, "id", None),
         trip_id=payload.get("trip_id") or payload.get("tripId") or None,
         scope=str(payload.get("scope") or "global"),
-        title=str(payload.get("title") or "新对话")[:200],
+        title=str(payload.get("title") or _DEFAULT_TITLE)[:200],
         context_json=json.dumps(_context(payload), ensure_ascii=False),
     )
     db.add(conv)
@@ -134,6 +164,94 @@ def _ensure_conversation(db: Session, user: Any, payload: dict) -> AiConversatio
     return conv
 
 
+# ---------------------------------------------------------------- 标题自动生成
+def _fallback_title(text: str) -> str:
+    """兜底标题：压缩空白后取前 16 个字符，空内容回退默认标题。"""
+    compact = " ".join(str(text or "").split())
+    return compact[:16].strip() or _DEFAULT_TITLE
+
+
+def _sanitize_title(text: str) -> str:
+    """清洗模型生成的标题：去装饰字符/引号/多余空白，截断到 12 字。"""
+    title = str(text or "").strip(" \t\r\n").strip("\"'`*_#>-：:")
+    title = " ".join(title.split())
+    return title[:12].strip()
+
+
+def _generate_title(gateway: LLMGateway, first_user: str, *,
+                    provider: str | None, model: str | None) -> str:
+    """用同一模型发一条非流式短请求生成标题；任何失败返回空串（调用方回退）。"""
+    try:
+        raw_events = gateway.chat(
+            [
+                {"role": "system", "content": TITLE_SYSTEM_PROMPT},
+                {"role": "user", "content": f"用户消息：{first_user[:200]}"},
+            ],
+            provider=provider, model=model, stream=False,
+        )
+        content = ""
+        for raw in raw_events:
+            if raw.startswith("event: error"):
+                return ""
+            if raw.startswith("event: done"):
+                try:
+                    data = json.loads(raw.split("data: ", 1)[1].strip())
+                except (ValueError, IndexError):
+                    return ""
+                content = str(data.get("content") or "")
+                break
+    except Exception:  # noqa: BLE001  标题失败必须静默，绝不影响对话
+        return ""
+    return _sanitize_title(content)
+
+
+def _update_conversation_title(conversation_id: str, user_id: str | None, title: str,
+                               *, expect: str | None = None) -> bool:
+    """在独立数据库会话里更新标题（后台线程用，避免跨线程复用请求级会话）。
+
+    expect 非空时仅当当前标题仍匹配才更新，防止覆盖用户手动改过的标题。
+    """
+    try:
+        from app.db.session import get_session
+
+        with get_session()() as db:
+            row = db.get(AiConversation, conversation_id)
+            if (row is None or row.user_id != user_id
+                    or getattr(row, "deleted_at", None) is not None):
+                return False
+            current = str(row.title or "").strip()
+            if expect is not None:
+                allowed = ("", _DEFAULT_TITLE) if expect == _DEFAULT_TITLE else (expect,)
+                if current not in allowed:
+                    return False
+            row.title = str(title)[:256]
+            db.commit()
+            return True
+    except Exception:  # noqa: BLE001  标题失败必须静默
+        return False
+
+
+def _record_title_failure(conversation_id: str, user_id: str | None) -> None:
+    """标题生成失败只落审计（2015），不打扰用户。"""
+    try:
+        from app.db.session import get_session
+        from app.services.ai.audit import record
+
+        with get_session()() as db:
+            record(db, user_id=user_id, action="title_failed", status="error",
+                   error="AI_TITLE_GENERATION_FAILED",
+                   payload={"conversation_id": conversation_id,
+                            "code": ErrorCode.AI_TITLE_GENERATION_FAILED})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _spawn_title_task(task: Callable[[], None]) -> None:
+    """后台线程执行标题任务，绝不阻塞 SSE 流；测试可 monkeypatch 改为同步执行。"""
+    threading.Thread(target=task, daemon=True).start()
+
+
+# ---------------------------------------------------------------- 基础查询端点
 @router.get("/ai/providers")
 def providers(request: Request, user: Any = Depends(require_user)):
     return ok(list_ai_providers(get_config_store().load()), request_id=_rid(request))
@@ -156,6 +274,7 @@ def list_conversations(request: Request, db: Session = Depends(get_db),
         .order_by(AiConversation.created_at.desc())
         .all()
     )
+    # 行内含 id / title / scope / trip_id / created_at / updated_at，标题字段已具备
     return ok([row_to_dict(row) for row in rows], request_id=_rid(request))
 
 
@@ -167,11 +286,89 @@ def create_conversation(request: Request, payload: dict = Body(default={}),
     return ok(row_to_dict(conv), request_id=_rid(request))
 
 
+@router.patch("/ai/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, request: Request,
+                        payload: dict = Body(default={}),
+                        db: Session = Depends(get_db),
+                        user: Any = Depends(require_permission("ai:use"))):
+    """重命名会话；标题不能为空，最长 256 字符。"""
+    conv = _own_conversation(db, conversation_id, user)
+    if conv is None:
+        raise AppError(ErrorCode.NOT_FOUND, "会话不存在")
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise AppError(ErrorCode.VALIDATION, "标题不能为空")
+    conv.title = title[:256]
+    db.commit()
+    return ok(row_to_dict(conv), request_id=_rid(request))
+
+
+@router.delete("/ai/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, request: Request,
+                        db: Session = Depends(get_db),
+                        user: Any = Depends(require_permission("ai:use"))):
+    """删除会话（软删）：会话与消息都标记 deleted_at，不再出现在列表与历史里。"""
+    conv = _own_conversation(db, conversation_id, user)
+    if conv is None:
+        raise AppError(ErrorCode.NOT_FOUND, "会话不存在")
+    now = datetime.now(UTC)
+    conv.deleted_at = now
+    db.query(AiMessage).filter(AiMessage.conversation_id == conversation_id).update(
+        {"deleted_at": now}, synchronize_session=False)
+    db.commit()
+    # 清掉补发日志，避免已删除会话继续被断线补发
+    _EVENT_LOG.pop(conversation_id, None)
+    _LAST_EVENT_ID.pop(conversation_id, None)
+    return ok({"conversationId": conversation_id, "deleted": True}, request_id=_rid(request))
+
+
+def _loads_or_none(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(str(raw))
+    except (ValueError, TypeError):
+        return None
+
+
+def _history_tool_calls(raw: Any) -> list[dict]:
+    """把落库的 tool_calls_json 还原为前端可渲染的结构化卡片数据。"""
+    calls = _loads_or_none(raw)
+    if not isinstance(calls, list):
+        return []
+    out: list[dict] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        arguments = call.get("arguments")
+        if isinstance(arguments, str):
+            arguments = _loads_or_none(arguments)
+        out.append({
+            "toolCallId": str(call.get("id") or ""),
+            "name": str(call.get("name") or ""),
+            "arguments": arguments if isinstance(arguments, dict) else {},
+        })
+    return out
+
+
+def _message_view(row: AiMessage) -> dict:
+    """单条历史消息视图：工具调用/结果还原为结构化数据，而非纯文本。"""
+    item = row_to_dict(row)
+    item["toolCalls"] = _history_tool_calls(item.get("tool_calls_json"))
+    if item.get("tool_call_id"):
+        item["toolCallId"] = str(item["tool_call_id"])
+    if row.role == "tool":
+        item["toolResult"] = _loads_or_none(item.get("content"))
+    return item
+
+
 @router.get("/ai/conversations/{conversation_id}/messages")
 def conversation_messages(conversation_id: str, request: Request, db: Session = Depends(get_db),
                           user: Any = Depends(require_user)):
-    conv = db.get(AiConversation, conversation_id)
-    if conv is None or conv.user_id != getattr(user, "id", None):
+    conv = _own_conversation(db, conversation_id, user)
+    if conv is None:
         raise AppError(ErrorCode.NOT_FOUND, "会话不存在")
     rows = (
         db.query(AiMessage)
@@ -179,7 +376,7 @@ def conversation_messages(conversation_id: str, request: Request, db: Session = 
         .order_by(AiMessage.created_at.asc())
         .all()
     )
-    return ok([row_to_dict(row) for row in rows], request_id=_rid(request))
+    return ok([_message_view(row) for row in rows], request_id=_rid(request))
 
 
 @router.get("/ai/tools")
@@ -218,10 +415,12 @@ def chat(request: Request, payload: dict = Body(default={}), db: Session = Depen
     if not messages:
         raise AppError(ErrorCode.VALIDATION, "消息不能为空")
     conv = _ensure_conversation(db, user, payload)
-    # context.tab / path / scope 注入为 system 提示，模型据此理解当前页面上下文
+    # 注入 system prompt + 页面上下文提示；后续每轮工具循环都会带上
+    full_messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     hint = _context_hint(_context(payload))
     if hint is not None:
-        messages = [hint] + messages
+        full_messages.append(hint)
+    full_messages.extend(messages)
 
     raw_last = request.headers.get("Last-Event-ID") or payload.get("last_event_id") or payload.get("lastEventId")
     if raw_last:
@@ -234,7 +433,7 @@ def chat(request: Request, payload: dict = Body(default={}), db: Session = Depen
             return StreamingResponse(iter(cached), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     return StreamingResponse(
-        _chat_stream(cfg, conv, messages, payload, user, db),
+        _chat_stream(cfg, conv, full_messages, payload, user, db),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -264,12 +463,33 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
         return tagged
 
     # 用户消息落库（只记录最后一条，避免重放时重复）
+    first_user = ""
     try:
         last_user = [m for m in messages if m.get("role") == "user"][-1]
-        record_message(db, conversation_id=conv_id, role="user",
-                       content=str(last_user.get("content") or ""))
+        first_user = str(last_user.get("content") or "")
+        record_message(db, conversation_id=conv_id, role="user", content=first_user)
     except Exception:  # noqa: BLE001  落库失败不影响对话
         pass
+
+    def start_title_task() -> None:
+        """首轮 assistant 完成后异步生成会话标题；绝不阻塞流。"""
+        if str(getattr(conv, "title", "") or "").strip() not in ("", _DEFAULT_TITLE):
+            return  # 用户已自定义标题（或上一轮已生成），不覆盖
+
+        def worker() -> None:
+            try:
+                fallback = _fallback_title(first_user)
+                if not _update_conversation_title(conv_id, user_id, fallback, expect=_DEFAULT_TITLE):
+                    return
+                better = _generate_title(gateway, first_user, provider=provider, model=model)
+                if better:
+                    _update_conversation_title(conv_id, user_id, better, expect=fallback)
+                else:
+                    _record_title_failure(conv_id, user_id)
+            except Exception:  # noqa: BLE001  标题生成失败静默回退
+                pass
+
+        _spawn_title_task(worker)
 
     # 前端二次确认后的写工具：后端执行（走权限）并把结果回灌上下文
     confirmed = payload.get("confirmToolCalls") or payload.get("confirmed_tool_calls") or []
@@ -314,17 +534,20 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
             except AppError as exc:
                 yield emit_event("error", {"code": exc.code, "message": exc.message})
                 return
+            result_json = json.dumps(result, ensure_ascii=False, default=str)
             yield emit_event("tool_call", {"toolCallId": call_id, "name": name,
                                            "arguments": args, "needConfirm": False, "confirmed": True})
             yield emit_event("tool_result", {"toolCallId": call_id, "name": name, "result": result})
+            record_message(db, conversation_id=conv_id, role="tool",
+                           tool_call_id=call_id, content=result_json)
             pre_calls.append({"id": call_id, "type": "function",
                               "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
-            pre_results.append({"role": "tool", "tool_call_id": call_id,
-                                "content": json.dumps(result, ensure_ascii=False, default=str)})
+            pre_results.append({"role": "tool", "tool_call_id": call_id, "content": result_json})
         if pre_calls:
             messages = messages + [{"role": "assistant", "content": None, "tool_calls": pre_calls}] + pre_results
 
-    tools = None if confirmed else registry.definitions()
+    # 工具定义：启用时每轮都带上（含确认回放后的收尾轮），模型才能持续结构化调用
+    tools = registry.definitions() or None
     round_index = 0
     while round_index < _MAX_TOOL_ROUNDS:
         round_index += 1
@@ -333,8 +556,8 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
         try:
             for raw in gateway.chat(
                 messages,
-                provider=provider if round_index == 1 else None,
-                model=model if round_index == 1 else None,
+                provider=provider,
+                model=model,
                 stream=True,
                 user_id=user_id, trip_id=trip_id, conversation_id=conv_id,
                 tools=tools, tool_calls_out=collected,
@@ -354,12 +577,18 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
             return
 
         if not collected:
-            yield tag(done_raw) if done_raw else emit_event("done", {"conversationId": conv_id})
+            if done_raw:
+                yield tag(done_raw)
+            else:
+                yield emit_event("done", {"conversationId": conv_id})
+            start_title_task()
             return
 
         pending_confirmation: list[dict] = []
         executed: list[dict] = []
         llm_tool_calls: list[dict] = []
+        # 同一轮内相同工具 + 相同参数的重复调用去重（模型重复抖动时只执行一次）
+        seen_calls: set[str] = set()
         for tc in collected:
             name = str(tc.get("name") or "")
             raw_args = tc.get("arguments") or ""
@@ -369,8 +598,26 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
                 args = {}
             if not isinstance(args, dict):
                 args = {}
+            dedup_key = f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)}"
+            if dedup_key in seen_calls:
+                continue
+            seen_calls.add(dedup_key)
             call_id = str(tc.get("id") or new_id())
             spec = TOOL_DEFS.get(name, {})
+            if not spec:
+                # 模型自造/未知的工具名：不中断对话，把失败回灌给模型自行纠正
+                message = f"未知工具：{name}"
+                failure = {"error": {"code": ErrorCode.AI_TOOL_CALL_INVALID, "message": message}}
+                yield emit_event("tool_call", {"toolCallId": call_id, "name": name,
+                                               "arguments": args, "needConfirm": False, "unknown": True})
+                yield emit_event("tool_result", {"toolCallId": call_id, "name": name, "result": failure})
+                failure_json = json.dumps(failure, ensure_ascii=False)
+                record_message(db, conversation_id=conv_id, role="tool",
+                               tool_call_id=call_id, content=failure_json)
+                executed.append({"role": "tool", "tool_call_id": call_id, "content": failure_json})
+                llm_tool_calls.append({"id": call_id, "type": "function",
+                                       "function": {"name": name, "arguments": raw_args or "{}"}})
+                continue
             if spec.get("write"):
                 # 写工具绝不自动执行，交给前端确认卡
                 yield emit_event("tool_call", {
@@ -387,9 +634,11 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
             except AppError as exc:
                 yield emit_event("error", {"code": exc.code, "message": exc.message})
                 return
+            result_json = json.dumps(result, ensure_ascii=False, default=str)
             yield emit_event("tool_result", {"toolCallId": call_id, "name": name, "result": result})
-            executed.append({"role": "tool", "tool_call_id": call_id,
-                             "content": json.dumps(result, ensure_ascii=False, default=str)})
+            record_message(db, conversation_id=conv_id, role="tool",
+                           tool_call_id=call_id, content=result_json)
+            executed.append({"role": "tool", "tool_call_id": call_id, "content": result_json})
             llm_tool_calls.append({"id": call_id, "type": "function",
                                    "function": {"name": name, "arguments": raw_args or "{}"}})
 
@@ -398,11 +647,24 @@ def _chat_stream(cfg: dict, conv: AiConversation, messages: list[dict], payload:
                 "conversationId": conv_id, "pendingConfirmation": True,
                 "toolCalls": pending_confirmation,
             })
+            start_title_task()
             return
 
-        # 回灌只读工具结果，进入第二轮生成最终回答
+        if not llm_tool_calls:
+            # 本轮全是重复调用被去重：没有新结果可回灌，直接收尾
+            if done_raw:
+                yield tag(done_raw)
+            else:
+                yield emit_event("done", {"conversationId": conv_id})
+            start_title_task()
+            return
+
+        # 回灌工具结果进入下一轮生成（tools/供应商/模型保持不变）
         messages = messages + [{"role": "assistant", "content": None, "tool_calls": llm_tool_calls}] + executed
-        tools = None
         if round_index >= _MAX_TOOL_ROUNDS:
-            yield tag(done_raw) if done_raw else emit_event("done", {"conversationId": conv_id})
+            if done_raw:
+                yield tag(done_raw)
+            else:
+                yield emit_event("done", {"conversationId": conv_id})
+            start_title_task()
             return

@@ -71,13 +71,13 @@ def _trip_payload(db: Session, trip_id: str) -> dict:
 
 
 def _empty_weather(message: str) -> dict:
-    """天气不可用时的归一化占位，保证下游渲染不抛异常。"""
+    """天气不可用时的归一化占位，保证下游渲染不抛异常；缺失字段一律为 None。"""
     return {
         "provider": "",
         "city": "",
         "current": {
-            "weather": "未知", "temperature": 0.0, "humidity": 0,
-            "wind": "未知", "report_time": "", "alerts": [],
+            "weather": None, "temperature": None, "humidity": None,
+            "wind": None, "report_time": None, "alerts": [],
         },
         "forecast": [],
         "advice_hints": [message],
@@ -114,22 +114,23 @@ def _llm_advice(prompt: str, db: Session) -> str | None:
 
 
 def _fallback_advice(weather: dict) -> str:
-    """AI 不可用时用天气提示词拼出可读的中文模板文本。"""
+    """AI 不可用时用天气提示词拼出可读的 Markdown 建议（供结构化渲染）。"""
     current = weather.get("current") or {}
     hints = weather.get("advice_hints") or []
+    temp = current.get("temperature")
+    temp_text = f"{temp:.0f}℃" if isinstance(temp, (int, float)) else "暂无气温"
     lines = [
-        f"当前天气：{current.get('weather') or '未知'}，"
-        f"{current.get('temperature', '--')}℃，{current.get('wind') or '风力未知'}。",
+        f"当前天气：{current.get('weather') or '暂无实况'}，{temp_text}，{current.get('wind') or '风力未知'}。",
         "出行建议：",
     ]
-    lines.extend(f"• {hint}" for hint in hints)
+    lines.extend(f"- {hint}" for hint in hints)
     if len(lines) == 2:
-        lines.append("• 天气适宜出行，祝你旅途愉快")
+        lines.append("- 天气适宜出行，祝你旅途愉快")
     return "\n".join(lines)
 
 
-def _send_weather_advice(db: Session, trip_id: str) -> dict:
-    """拉天气 -> LLM 生成建议 -> 发给默认收件人；AI/天气不可用时降级，不抛异常。"""
+def _build_weather_advice(db: Session, trip_id: str) -> tuple[dict, dict, str]:
+    """拉天气 -> LLM 生成建议（不可用则降级）；纯计算，不发送任何邮件。"""
     trip = _trip_payload(db, trip_id)
     city = trip.get("destination") or ""
     try:
@@ -137,15 +138,37 @@ def _send_weather_advice(db: Session, trip_id: str) -> dict:
             weather_service.fetch_weather(city, db=db)
             if city else _empty_weather("未设置目的地，暂无法获取天气")
         )
-    except Exception:
-        weather = _empty_weather("天气服务暂不可用，请稍后再试")
+    except Exception as exc:  # noqa: BLE001  天气不可用降级，不阻断预览/发送
+        message = getattr(exc, "message", None) or "天气服务暂不可用，请稍后再试"
+        weather = _empty_weather(message)
     prompt = weather_service.build_advice_prompt(trip, weather)
     advice = _llm_advice(prompt, db) or _fallback_advice(weather)
-    result = mail_service.send_weather_advice(db, trip, advice=advice, weather=weather)
-    return {"sent": result["sent"], "failed": result["failed"], "advice": advice}
+    return trip, weather, advice
 
 
 @router.post("/trips/{trip_id}/weather-advice")
-def weather_advice(trip_id: str, request: Request, db: Session = Depends(get_db),
-                   user: Any = Depends(require_permission("trip:settings"))):
-    return ok(_send_weather_advice(db, trip_id), request_id=_rid(request))
+def weather_advice_preview(trip_id: str, request: Request, db: Session = Depends(get_db),
+                           user: Any = Depends(require_permission("trip:settings"))):
+    """【预览】生成天气与出行建议，纯读不发送，供详情页「天气与出行建议」使用。"""
+    trip, weather, advice = _build_weather_advice(db, trip_id)
+    subject, html_body = mail_service.build_advice_email(trip, advice, weather)
+    return ok(
+        {
+            "sent": 0, "failed": 0, "dry_run": True,
+            "advice": advice, "subject": subject, "preview_html": html_body,
+            "weather": weather,
+        },
+        request_id=_rid(request),
+    )
+
+
+@router.post("/trips/{trip_id}/weather-advice/send")
+def weather_advice_send(trip_id: str, request: Request, db: Session = Depends(get_db),
+                        user: Any = Depends(require_permission("trip:settings"))):
+    """【发送】显式手动触发行程天气建议邮件给默认收件人。"""
+    trip, weather, advice = _build_weather_advice(db, trip_id)
+    result = mail_service.send_weather_advice(db, trip, advice=advice, weather=weather)
+    return ok(
+        {"sent": result["sent"], "failed": result["failed"], "advice": advice},
+        request_id=_rid(request),
+    )
