@@ -6,6 +6,8 @@
   3) 全部 /api/v1 路由
   4) /assets 静态目录
   5) 最后 catch-all 返回 index.html（内部对 api/ 做 404 双保险）
+
+应用镜像只包含前后端运行所需产物；VitePress 文档不参与镜像构建或托管。
 严禁 app.mount("/", StaticFiles(html=True)) —— 会静默吞掉全部 /api/*。
 """
 from __future__ import annotations
@@ -93,11 +95,6 @@ def create_app() -> FastAPI:
     assets = static / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
-
-    # VitePress 文档站：/FlashTrip/ → static/docs；未构建文档时静默跳过。
-    from app.docs_mount import mount_docs
-
-    mount_docs(app)
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str, request: Request):  # noqa: ANN001

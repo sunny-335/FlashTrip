@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # 瞬旅 FlashTrip · 前后端 + 文档站单镜像
 #   stage 1  frontend : Node 22 构建 Vue3 SPA → dist
-#   stage 2  docs     : Node 22 构建 VitePress 文档站（base=/FlashTrip/）→ dist
-#   stage 3  runtime  : Python 3.12 (uv) + FastAPI 托管静态文件，单进程 uvicorn
+#   stage 2  runtime  : Python 3.12 (uv) + FastAPI 托管静态文件，单进程 uvicorn
 # 镜像源由 scripts/mirror_probe.sh 探测后以 --build-arg 注入，默认 official。
 
 ARG APT_MIRROR=""
@@ -24,21 +23,6 @@ RUN pnpm install --frozen-lockfile --allow-build=esbuild --allow-build=vue-demi
 COPY frontend/ ./
 RUN pnpm build \
  && test -f /web/dist/index.html
-
-# ---------------------------------------------------------------- docs (VitePress)
-FROM node:22-slim AS docs
-ARG NPM_REGISTRY
-WORKDIR /docs
-RUN corepack enable \
- && corepack prepare pnpm@12.18.0 --activate \
- && npm config set fetch-retries 5 \
- && npm config set fetch-timeout 120000 \
- && if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi
-COPY docs/package.json docs/pnpm-lock.yaml docs/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile --allow-build=esbuild
-COPY docs/ ./
-RUN pnpm docs:build \
- && test -f /docs/.vitepress/dist/index.html
 
 # ---------------------------------------------------------------- runtime
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
@@ -74,8 +58,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY backend/ ./
 # 前端构建产物注入：dist 必须在启动时存在，否则 SPA 500
 COPY --from=frontend /web/dist ./app/static
-# 文档站注入：VitePress 产物挂到 /FlashTrip（挂载见 backend/app/docs_mount.py）
-COPY --from=docs /docs/.vitepress/dist ./app/static/docs
 ENV PATH="/app/.venv/bin:$PATH"
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh \

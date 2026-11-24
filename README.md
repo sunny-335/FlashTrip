@@ -11,7 +11,7 @@ AI 驱动的自研多功能旅行规划应用。单镜像部署，首次访问�
 | 数据 | SQLite 默认（`/data` 卷），向导可切换 PostgreSQL / Redis |
 | AI | 小米 MiMo / 通义千问 / DeepSeek / Kimi / OpenAI / 自定义 OpenAI 兼容端点 |
 | 地图 | 高德 / 天地图，预设元数据自动带出署名与审图号；路线与导航支持高德、腾讯、百度导航深链 |
-| 文档 | VitePress，应用内路由 `/FlashTrip/` |
+| 文档 | VitePress 独立构建；不参与应用 Docker 镜像 |
 | 部署 | GitHub Actions → GHCR 单镜像，支持 `docker run` 与 Docker Compose |
 
 协议：MIT。信息架构参考 [TREK](https://github.com/liketrek/TREK)，未使用其 AGPL 源码，见 `NOTICE.md`。
