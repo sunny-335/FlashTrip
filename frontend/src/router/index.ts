@@ -39,24 +39,33 @@ const router = createRouter({ history: createWebHistory(), routes })
 
 interface WizardStatus { installed: boolean; unlocked?: boolean }
 let statusCache: WizardStatus | null = null
+let statusPending: Promise<WizardStatus> | null = null
 
 export async function wizardStatus(force = false): Promise<WizardStatus> {
   if (statusCache && !force) return statusCache
-  try {
-    const resp = await fetch('/api/v1/wizard/status', { credentials: 'same-origin' })
-    const body = await resp.json()
-    statusCache = {
-      installed: Boolean(body?.data?.installed),
-      unlocked: Boolean(body?.data?.unlocked),
+  // 并发调用复用同一次探测，避免首屏与路由守卫重复请求
+  if (statusPending && !force) return statusPending
+  statusPending = (async () => {
+    try {
+      const resp = await fetch('/api/v1/wizard/status', { credentials: 'same-origin' })
+      const body = await resp.json()
+      statusCache = {
+        installed: Boolean(body?.data?.installed),
+        unlocked: Boolean(body?.data?.unlocked),
+      }
+    } catch {
+      statusCache = { installed: false }
+    } finally {
+      statusPending = null
     }
-  } catch {
-    statusCache = { installed: false }
-  }
-  return statusCache!
+    return statusCache!
+  })()
+  return statusPending
 }
 
 export function clearStatusCache() {
   statusCache = null
+  statusPending = null
 }
 
 async function isAuthenticated(): Promise<boolean> {

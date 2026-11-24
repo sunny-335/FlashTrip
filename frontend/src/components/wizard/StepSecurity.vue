@@ -1,14 +1,11 @@
 <script setup lang="ts">
-/** 第 6 步：主密钥强制备份、可选 Redis、AI 写工具开关。 */
+/** 第 6 步：主密钥强制备份。Redis 已并入第 1 步（数据库），AI 写工具开关并入第 3 步（人工智能）。 */
 import { computed, onMounted } from 'vue'
 import { KeyRound, Download, Copy, CheckCircle2, Eye, EyeOff } from 'lucide-vue-next'
-import { ApiError } from '@/lib/api'
 import Button from '@/components/ui/Button.vue'
-import Input from '@/components/ui/Input.vue'
-import { generateSecretKey, useConfigStore, type InstallIn, type WizardProbe } from '@/stores/config'
+import { generateSecretKey, type InstallIn, type WizardProbe } from '@/stores/config'
 
 const props = defineProps<{ form: InstallIn; probe: WizardProbe }>()
-const cfg = useConfigStore()
 
 onMounted(() => {
   if (!props.form.secret_key) props.form.secret_key = generateSecretKey()
@@ -55,29 +52,6 @@ async function copyKey() {
     /* 非安全上下文忽略，仍可手动下载 */
   }
 }
-
-async function testRedis() {
-  props.probe.redis.error = ''
-  props.probe.redis.tested = true
-  try {
-    const r = await cfg.testRedis(props.form.redis_url)
-    props.probe.redis.ok = r.ok
-    props.probe.redis.enabled = r.enabled
-    props.form.redis_enabled = r.enabled
-  } catch (e) {
-    props.probe.redis.ok = false
-    props.form.redis_enabled = false
-    props.probe.redis.error = e instanceof ApiError ? e.message : (e as Error).message
-  }
-}
-
-function toggleRedis() {
-  props.probe.redis.skipped = !props.probe.redis.skipped
-  if (props.probe.redis.skipped) {
-    props.form.redis_enabled = false
-    props.probe.redis.ok = false
-  }
-}
 </script>
 
 <template>
@@ -109,31 +83,6 @@ function toggleRedis() {
         <CheckCircle2 class="h-3.5 w-3.5" /> 已备份
       </span>
       <span v-else class="text-xs text-destructive">必须下载备份后才能继续</span>
-    </div>
-
-    <div class="border-t border-border pt-4">
-      <label class="flex items-center gap-2 text-xs">
-        <input :checked="!probe.redis.skipped" type="checkbox" class="h-3.5 w-3.5 accent-[var(--primary)]" @change="toggleRedis" />
-        启用外部 Redis（可选；不启用时使用进程内事件总线）
-      </label>
-      <div v-if="!probe.redis.skipped" class="mt-3 space-y-2">
-        <div class="flex items-end gap-2">
-          <div class="flex-1 space-y-1.5">
-            <label class="text-xs font-medium">Redis 连接串</label>
-            <Input v-model="form.redis_url" placeholder="redis://host:6379/0" />
-          </div>
-          <Button variant="outline" size="sm" @click="testRedis">测试</Button>
-        </div>
-        <p v-if="probe.redis.ok" class="text-xs text-primary">连接成功。</p>
-        <p v-if="probe.redis.error" class="text-xs text-destructive">{{ probe.redis.error }}</p>
-      </div>
-    </div>
-
-    <div class="border-t border-border pt-4">
-      <label class="flex items-start gap-2 text-xs">
-        <input v-model="form.ai_tools_enabled" type="checkbox" class="mt-0.5 h-3.5 w-3.5 accent-[var(--primary)]" />
-        <span>启用 AI 写类工具（默认关闭）。开启后 Agent 的写操作仍需前端二次确认并经过同一套权限校验。</span>
-      </label>
     </div>
   </div>
 </template>

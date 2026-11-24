@@ -102,5 +102,12 @@ async function probeModels() {
         {{ probe.ai.error }}
       </div>
     </div>
+
+    <div class="border-t border-border pt-4">
+      <label class="flex items-start gap-2 text-xs">
+        <input v-model="form.ai_tools_enabled" type="checkbox" class="mt-0.5 h-3.5 w-3.5 accent-[var(--primary)]" />
+        <span>启用 AI 写类工具。开启后 Agent 的写操作仍需前端二次确认并经过同一套权限校验。</span>
+      </label>
+    </div>
   </div>
 </template>

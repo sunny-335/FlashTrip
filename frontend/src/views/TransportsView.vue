@@ -208,35 +208,42 @@ onMounted(() => { void Promise.all([load(), loadPlanOptions()]) })
       <EmptyState v-if="!items.length" title="还没有交通段落" description="记录车次、航班与起终点，方便串联行程。" :icon="Route">
         <Button size="sm" @click="openCreate"><Plus class="h-3.5 w-3.5" /> 新增第一段</Button>
       </EmptyState>
-      <div v-else class="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div v-for="t in items" :key="t.id" class="rounded-lg border border-border bg-card p-3">
-          <div class="flex items-start justify-between gap-2">
-            <div class="min-w-0">
-              <div class="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                <Badge variant="outline">{{ modeLabel(t.mode) }}</Badge>
-                <span class="truncate">{{ t.from_name || '起点' }}</span>
-                <span class="text-muted-foreground">→</span>
-                <span class="truncate">{{ t.to_name || '终点' }}</span>
-              </div>
-              <p class="mt-1.5 text-[11px] text-muted-foreground">
-                {{ formatDate(t.depart_at) }}<span v-if="t.arrive_at"> → {{ formatDate(t.arrive_at) }}</span>
-                <span v-if="t.carrier"> · {{ t.carrier }}</span><span v-if="t.seat"> · {{ t.seat }}</span>
-              </p>
-              <p v-if="dayName(t.day_id) || itemName(t.plan_item_id)" class="mt-1 text-[11px] text-primary">
-                <span v-if="dayName(t.day_id)">{{ dayName(t.day_id) }}</span>
-                <span v-if="itemName(t.plan_item_id)"> · {{ itemName(t.plan_item_id) }}</span>
-              </p>
-              <p v-if="t.from_lng !== null || t.to_lng !== null" class="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground">
-                <MapPin class="h-2.5 w-2.5" /> 已记录坐标 · {{ t.coord_system }} 坐标系
-              </p>
+      <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <article v-for="t in items" :key="t.id" class="group overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-shadow hover:shadow-md">
+          <div class="flex items-center justify-between border-b border-border bg-muted/35 px-4 py-3">
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Route class="size-4" /></span>
+              <Badge variant="outline" class="bg-background">{{ modeLabel(t.mode) }}</Badge>
+              <span v-if="dayName(t.day_id)" class="truncate text-[11px] text-muted-foreground">{{ dayName(t.day_id) }}</span>
             </div>
-            <span class="shrink-0 text-xs text-foreground">{{ formatMoney(t.price) }}</span>
+            <span class="shrink-0 text-sm font-semibold text-foreground">{{ formatMoney(t.price) }}</span>
           </div>
-          <div class="mt-3 flex justify-end gap-1.5 border-t border-border pt-2">
+          <div class="space-y-4 p-4">
+            <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+              <div class="min-w-0">
+                <p class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">出发</p>
+                <p class="mt-1 truncate text-sm font-semibold text-foreground">{{ t.from_name || '起点待填写' }}</p>
+              </div>
+              <span class="rounded-full border border-border bg-background px-2 py-1 text-xs text-muted-foreground">→</span>
+              <div class="min-w-0 text-right">
+                <p class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">到达</p>
+                <p class="mt-1 truncate text-sm font-semibold text-foreground">{{ t.to_name || '终点待填写' }}</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2 rounded-lg bg-muted/35 p-3 text-xs">
+              <div><p class="text-[10px] text-muted-foreground">出发时间</p><p class="mt-1 font-medium text-foreground">{{ formatDate(t.depart_at) || '待安排' }}</p></div>
+              <div><p class="text-[10px] text-muted-foreground">到达时间</p><p class="mt-1 font-medium text-foreground">{{ formatDate(t.arrive_at) || '待安排' }}</p></div>
+              <div v-if="t.carrier"><p class="text-[10px] text-muted-foreground">承运方</p><p class="mt-1 truncate font-medium text-foreground">{{ t.carrier }}</p></div>
+              <div v-if="t.seat"><p class="text-[10px] text-muted-foreground">车次 / 座位</p><p class="mt-1 truncate font-medium text-foreground">{{ t.seat }}</p></div>
+            </div>
+            <p v-if="itemName(t.plan_item_id)" class="flex items-center gap-1.5 truncate text-xs text-muted-foreground"><MapPin class="size-3.5 shrink-0" />关联地点：{{ itemName(t.plan_item_id) }}</p>
+            <p v-if="t.from_lng !== null || t.to_lng !== null" class="flex items-center gap-1 text-[10px] text-muted-foreground"><MapPin class="size-3" />已记录 {{ t.coord_system }} 坐标</p>
+          </div>
+          <div class="flex justify-end gap-1.5 border-t border-border px-4 py-3">
             <Button variant="outline" size="sm" @click="openEdit(t)"><Pencil class="h-3.5 w-3.5" /> 编辑</Button>
             <Button variant="ghost" size="sm" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteTarget = t"><Trash2 class="h-3.5 w-3.5" /> 删除</Button>
           </div>
-        </div>
+        </article>
       </div>
     </template>
 

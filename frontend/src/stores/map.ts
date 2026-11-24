@@ -55,22 +55,18 @@ export function normalizeCoord(value?: string | null): CoordSystem {
 /** 有 POI 搜索能力的国内供应商（后端 pick_provider 白名单）。 */
 export const POI_PROVIDER_IDS = ['amap', 'tianditu']
 
-/** 初始化兜底仅供短暂加载状态；正式地图必须使用服务端下发的合规 Provider 样式。 */
-export const DEFAULT_VECTOR_STYLE_URL = ''
-
 /**
  * 生成传给 new maplibregl.Map({ style }) / map.setStyle 的值：
- * - style.styleUrl 存在（OpenFreeMap 等矢量引用式）→ 必须直接返回该 URL 字符串，
- *   否则把「sources/layers 为空」的 style 对象交给 MapLibre 会得到一张空白地图；
- * - 高德 / 天地图（raster 代理式）→ 返回后端下发的 raster style 对象，
- *   瓦片已指向 /map/tiles/... 代理路径，URL 内不含密钥；
- * - 信息缺失时回退到免密钥矢量 style，避免空白。
+ * 矢量样式使用服务端预设 URL，raster 代理使用服务端下发的 style 对象。
+ * 预设缺失或为空时抛出错误，由页面展示错误状态，避免将空字符串交给 MapLibre。
  */
 export function styleForProvider(p: MapProvider): string | MapStyleSpec {
   const styleUrl = p.style?.styleUrl || (!p.tileUrlTemplate ? p.styleUrl : null)
-  if (styleUrl) return String(styleUrl)
-  if (p.style && (p.style.version || p.style.sources)) return p.style
-  return DEFAULT_VECTOR_STYLE_URL
+  if (typeof styleUrl === 'string' && styleUrl.trim()) return styleUrl
+  if (p.style && typeof p.style === 'object'
+      && p.style.version && Object.keys(p.style.sources ?? {}).length
+      && Array.isArray(p.style.layers) && p.style.layers.length) return p.style
+  throw new Error(`地图供应商“${p.label}”未提供有效样式，无法初始化地图`)
 }
 
 export const useMapStore = defineStore('map', () => {

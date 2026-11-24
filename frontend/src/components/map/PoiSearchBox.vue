@@ -3,7 +3,7 @@
  *  紧凑单行输入框，结果以绝对定位浮层下拉展示，不铺满遮挡地图。
  *  后端 POI 供应商白名单仅高德 / 天地图；底图供应商不自动成为 POI 搜索源。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Search, Loader2, Plus, MapPin } from 'lucide-vue-next'
 import { api, ApiError } from '@/lib/api'
 import type { MapProvider } from '@/stores/map'
@@ -38,6 +38,7 @@ const loading = ref(false)
 const addingId = ref('')
 const error = ref('')
 const searched = ref(false)
+let searchVersion = 0
 
 /** 结果里的 provider 是供应商 id，展示时转成品牌名（品牌名保留原样）。 */
 const PROVIDER_LABEL: Record<string, string> = {
@@ -56,25 +57,45 @@ const showPanel = computed(() =>
   || (searched.value && !loading.value && results.value.length === 0 && !error.value),
 )
 
+/** 关键词被清空时立即收起浮层并丢弃旧结果，避免出现「删完仍显示结果」的僵硬感。 */
+watch(q, () => {
+  searchVersion += 1
+  results.value = []
+  error.value = ''
+  searched.value = false
+  loading.value = false
+})
+
+watch(provider, () => {
+  searchVersion += 1
+  results.value = []
+  error.value = ''
+  searched.value = false
+  loading.value = false
+})
+
 function messageOf(e: unknown): string {
   return e instanceof ApiError ? e.message : (e as Error)?.message || '操作失败'
 }
 
 async function search() {
   const keyword = q.value.trim()
-  if (!keyword || loading.value) return
+  if (!keyword) return
+  const version = ++searchVersion
   loading.value = true
   error.value = ''
   searched.value = true
   try {
     const params = new URLSearchParams({ q: keyword })
     if (provider.value) params.set('provider', provider.value)
-    results.value = await api.get<Poi[]>(`/map/poi/search?${params.toString()}`)
+    const found = await api.get<Poi[]>(`/map/poi/search?${params.toString()}`)
+    if (version === searchVersion) results.value = found
   } catch (e) {
+    if (version !== searchVersion) return
     error.value = messageOf(e)
     results.value = []
   } finally {
-    loading.value = false
+    if (version === searchVersion) loading.value = false
   }
 }
 

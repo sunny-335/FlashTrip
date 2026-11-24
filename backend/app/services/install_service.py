@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from alembic import command
@@ -23,12 +25,12 @@ from sqlalchemy.orm import Session
 
 from app import __version__
 from app.core.config import (
+    DEFAULT_SQLITE_URL,
     config_path,
     data_dir,
     get_settings,
     installed_marker_path,
     resolve_database_url,
-    resolve_redis_url,
     static_dir,
 )
 from app.core.config_store import get_config_store
@@ -77,11 +79,30 @@ def _cfg_providers(section: Any) -> list[dict]:
 # ---------------------------------------------------------------- 请求 DTO
 
 class DbTestIn(BaseModel):
+    """数据库连接探测请求。
+
+    兼容两种形态：
+    - 结构化字段（推荐）：dialect + host/port/username/password/database；
+    - 完整连接串 url（历史兼容，仍然支持）。
+    """
+
     url: str = ""
+    dialect: str = ""
+    host: str = ""
+    port: int = 0
+    username: str = ""
+    password: str = ""
+    database: str = ""
 
 
 class RedisTestIn(BaseModel):
+    """Redis 连接探测请求：地址/端口/密码/库序号，或历史兼容的完整连接串。"""
+
     url: str = ""
+    host: str = ""
+    port: int = 0
+    password: str = ""
+    database: int = 0
 
 
 class AiTestIn(BaseModel):
@@ -130,16 +151,33 @@ class MapProviderIn(BaseModel):
 
 
 class InstallIn(BaseModel):
-    database_url: str = "sqlite:////data/flashtrip.db"
+    """安装请求体。
+
+    数据库与 Redis 均可只提交结构化字段（地址/端口/用户名/密码/库名），
+    由后端拼装连接串；database_url / redis_url 仍作为兼容字段保留。
+    """
+
+    database_url: str = ""
     database_dialect: str = ""
+    # 结构化数据库字段（PostgreSQL）
+    db_host: str = ""
+    db_port: int = 0
+    db_username: str = ""
+    db_password: str = ""
+    db_name: str = "flashtrip"
     redis_url: str = ""
     redis_enabled: bool = False
+    # 结构化 Redis 字段
+    redis_host: str = ""
+    redis_port: int = 0
+    redis_password: str = ""
+    redis_db: int = 0
     admin: AdminIn
     ai_providers: list[AiProviderIn] = Field(default_factory=list)
     map_providers: list[MapProviderIn] = Field(default_factory=list)
     map_default_provider_id: str = "amap"
     audit_number: str = ""
-    ai_tools_enabled: bool = False
+    ai_tools_enabled: bool = True
     # 邮件通知：向导可配置也可跳过；跳过时只写 mail_skipped 标记。
     # 字段与 mail_service._MAIL_DEFAULTS 一致，password 明文仅在内存中，落盘加密。
     mail: dict | None = None
@@ -193,13 +231,121 @@ class UnlockIn(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+# ---------------------------------------------------------------- 连接串构造
+
+_PG_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_DEFAULT_PG_PORT = 5432
+_DEFAULT_REDIS_PORT = 6379
+
+
+def build_database_url(
+    dialect: str,
+    *,
+    host: str = "",
+    port: int = 0,
+    username: str = "",
+    password: str = "",
+    database: str = "",
+) -> str:
+    """按结构化字段拼装连接串；SQLite 固定走数据目录单文件。
+
+    - SQLite：忽略其余字段，返回 sqlite:////data/flashtrip.db。
+    - PostgreSQL：缺省端口 5432；用户名/密码为空时省略对应片段。
+    """
+    if dialect != "postgresql":
+        return DEFAULT_SQLITE_URL
+    host = (host or "").strip()
+    if not host:
+        raise AppError(ErrorCode.VALIDATION, "数据库地址不能为空")
+    port_num = int(port or _DEFAULT_PG_PORT)
+    db_name = (database or "flashtrip").strip() or "flashtrip"
+    user = (username or "").strip()
+    secret = password or ""
+    auth = ""
+    if user:
+        auth = quote(user, safe="")
+        if secret:
+            auth += f":{quote(secret, safe='')}"
+        auth += "@"
+    return f"postgresql://{auth}{host}:{port_num}/{db_name}"
+
+
+def build_redis_url(
+    *,
+    host: str = "",
+    port: int = 0,
+    password: str = "",
+    database: int = 0,
+) -> str:
+    """按结构化字段拼装 Redis 连接串；密码为空时省略认证片段。"""
+    host = (host or "").strip()
+    if not host:
+        return ""
+    port_num = int(port or _DEFAULT_REDIS_PORT)
+    db_index = int(database or 0)
+    auth = ""
+    if password:
+        auth = f":{quote(password, safe='')}@"
+    return f"redis://{auth}{host}:{port_num}/{db_index}"
+
+
+def _ensure_pg_database(url: str, db_name: str) -> None:
+    """连接目标库不存在时自动创建（先连 postgres 维护库执行 CREATE DATABASE）。
+
+    已存在则跳过；权限不足时抛出中文提示，绝不静默继续。
+    """
+    if not _PG_IDENT_RE.match(db_name):
+        raise AppError(ErrorCode.VALIDATION, f"数据库名不合法：{db_name}")
+    parts = urlsplit(url)
+    maintenance = urlunsplit((parts.scheme, parts.netloc, "/postgres", parts.query, parts.fragment))
+    try:
+        engine = create_engine(
+            maintenance, connect_args={"connect_timeout": 5}, pool_pre_ping=True,
+            isolation_level="AUTOCOMMIT",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("wizard.pg_engine_failed", error=type(exc).__name__)
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": db_name}
+            ).scalar()
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+    except Exception as exc:  # noqa: BLE001  异常消息可能含连接串，只记录类型
+        log.warning("wizard.pg_ensure_database_failed", error=type(exc).__name__)
+        raise AppError(
+            ErrorCode.DB_CONNECT_FAILED,
+            f"无法创建数据库 {db_name}：请确认账号具备建库权限（{type(exc).__name__}）",
+        ) from exc
+    finally:
+        engine.dispose()
+
+
 # ---------------------------------------------------------------- 连通性探测
 
 def test_database(payload: DbTestIn) -> dict:
-    """SELECT 1 + 取版本，3s 超时；失败 DB_CONNECT_FAILED。"""
-    url = (payload.url or resolve_database_url()).strip()
+    """SELECT 1 + 取版本，3s 超时；失败 DB_CONNECT_FAILED。
+
+    PostgreSQL 场景下会先确保目标库存在（不存在则自动创建），再连目标库校验。
+    """
+    url = (payload.url or "").strip()
+    db_name = (payload.database or "").strip()
+    if not url:
+        url = build_database_url(
+            payload.dialect or "sqlite",
+            host=payload.host,
+            port=payload.port,
+            username=payload.username,
+            password=payload.password,
+            database=db_name,
+        )
     if not url:
         raise AppError(ErrorCode.DB_CONNECT_FAILED, "数据库连接串为空")
+    if url.startswith("postgres") and db_name:
+        _ensure_pg_database(url, db_name)
     kwargs: dict[str, Any] = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"timeout": 3}
@@ -225,7 +371,14 @@ def test_database(payload: DbTestIn) -> dict:
 
 
 def test_redis(payload: RedisTestIn) -> dict:
-    url = (payload.url or resolve_redis_url()).strip()
+    url = (payload.url or "").strip()
+    if not url:
+        url = build_redis_url(
+            host=payload.host,
+            port=payload.port,
+            password=payload.password,
+            database=payload.database,
+        )
     if not url:
         return {"ok": True, "enabled": False, "message": "未配置 Redis（可跳过）"}
     try:
@@ -382,17 +535,56 @@ def _dialect(url: str) -> str:
     return "sqlite" if head == "sqlite" else head
 
 
+def _resolved_database_url(payload: InstallIn) -> tuple[str, str]:
+    """返回 (连接串, 方言)。
+
+    优先使用结构化字段拼装；仅当结构化字段为空时回退到提交的连接串。
+    """
+    dialect = (payload.database_dialect or "").strip()
+    structured = bool(payload.db_host.strip()) or dialect == "postgresql"
+    if structured:
+        if not dialect:
+            dialect = "postgresql"
+        url = build_database_url(
+            dialect,
+            host=payload.db_host,
+            port=payload.db_port,
+            username=payload.db_username,
+            password=payload.db_password,
+            database=payload.db_name,
+        )
+        return url, dialect
+    url = (payload.database_url or "").strip()
+    if not url:
+        return DEFAULT_SQLITE_URL, "sqlite"
+    return url, (dialect or _dialect(url))
+
+
+def _resolved_redis_url(payload: InstallIn) -> str:
+    """返回 Redis 连接串；结构化字段优先，回退到提交的 url。"""
+    if payload.redis_host.strip():
+        return build_redis_url(
+            host=payload.redis_host,
+            port=payload.redis_port,
+            password=payload.redis_password,
+            database=payload.redis_db,
+        )
+    return (payload.redis_url or "").strip()
+
+
 def _base_config(payload: InstallIn, secret_key: str) -> dict:
+    db_url, db_dialect = _resolved_database_url(payload)
+    redis_url = _resolved_redis_url(payload)
     return {
         "installed": False,
         "installed_at": "",
         "version": __version__,
         "secret_key": secret_key,
         "database": {
-            "url": payload.database_url,
-            "dialect": payload.database_dialect or _dialect(payload.database_url),
+            "url": db_url,
+            "dialect": db_dialect,
         },
-        "redis": {"url": payload.redis_url, "enabled": bool(payload.redis_enabled and payload.redis_url)},
+        "redis": {"url": redis_url, "enabled": bool(payload.redis_enabled and redis_url)},
         "ai": {"providers": []},
         "map": {
             "providers": [],
@@ -583,8 +775,14 @@ def _alembic_config() -> AlembicConfig:
 
 def _validate_install(payload: InstallIn) -> None:
     """逐项校验向导输入；真实连通性只探测 DB（AI/地图/Redis 由独立 test-* 端点先行验证）。"""
-    if not payload.database_url.strip():
-        raise AppError(ErrorCode.VALIDATION, "数据库连接串不能为空")
+    db_url, db_dialect = _resolved_database_url(payload)
+    if not db_url.strip():
+        raise AppError(ErrorCode.VALIDATION, "数据库连接信息不完整")
+    if db_dialect == "postgresql":
+        if not payload.db_host.strip():
+            raise AppError(ErrorCode.VALIDATION, "数据库地址不能为空")
+        if not payload.db_username.strip():
+            raise AppError(ErrorCode.VALIDATION, "数据库用户名不能为空")
     if not payload.admin.username.strip():
         raise AppError(ErrorCode.VALIDATION, "管理员账号不能为空")
     # 管理员密码：8-32 位、四类字符齐全、禁连续串（与普通用户口径不同）
@@ -597,15 +795,31 @@ def _validate_install(payload: InstallIn) -> None:
         if p.enabled and not p.base_url.strip():
             raise AppError(ErrorCode.VALIDATION, f"AI 供应商 {p.id} 未配置 base_url")
     seen.clear()
-    needs_token_ids = {d["id"] for d in PROVIDER_DEFS if d.get("needsToken")}
+    map_presets = {d["id"]: d for d in PROVIDER_DEFS if not d.get("internal")}
+    selected_map = map_presets.get(payload.map_default_provider_id)
+    if selected_map is None:
+        raise AppError(ErrorCode.VALIDATION, f"未知地图供应商：{payload.map_default_provider_id}")
+    map_provider_keys: dict[str, str] = {}
     for p in payload.map_providers:
         if p.id in seen:
             raise AppError(ErrorCode.VALIDATION, f"地图供应商 id 重复：{p.id}")
         seen.add(p.id)
-        # 是否需要密钥由预设元数据判定，不再依赖前端传入
-        if p.id in needs_token_ids and not p.key:
-            raise AppError(ErrorCode.VALIDATION, f"地图供应商 {p.id} 需要 token/key")
-    test_database(DbTestIn(url=payload.database_url))
+        preset = map_presets.get(p.id)
+        if preset is None:
+            raise AppError(ErrorCode.VALIDATION, f"未知地图供应商：{p.id}")
+        map_provider_keys[p.id] = p.key
+    # 安装使用的默认底图必须有可用瓦片密钥；连通性探测可跳过，不代表密钥可省略。
+    if selected_map.get("needsTileKey") and not map_provider_keys.get(payload.map_default_provider_id, "").strip():
+        raise AppError(
+            ErrorCode.VALIDATION,
+            f"地图供应商 {payload.map_default_provider_id} 需要配置 token/key；可以跳过连通性探测，但安装必须配置密钥",
+        )
+    # 探测真实连通性；PostgreSQL 目标库不存在时在此自动创建
+    test_database(DbTestIn(
+        url=db_url,
+        dialect=db_dialect,
+        database=payload.db_name if db_dialect == "postgresql" else "",
+    ))
 
 
 def _rollback_install(alembic_cfg: AlembicConfig | None, original_raw: str | None, had_marker: bool) -> None:

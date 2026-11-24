@@ -16,8 +16,7 @@ import { useRoute } from 'vue-router'
 import { Loader2 } from 'lucide-vue-next'
 import { fromWgs84, type CoordSystem } from '@/lib/coord'
 import {
-  useMapStore, normalizeCoord, styleForProvider, DEFAULT_VECTOR_STYLE_URL,
-  type MapStyleSpec,
+  useMapStore, normalizeCoord, styleForProvider,
 } from '@/stores/map'
 import { usePlanStore, type PlanItem } from '@/stores/plan'
 import { PLAN_CTX } from '@/composables/usePlanDnd'
@@ -157,13 +156,17 @@ watch(() => mapStore.currentProviderId, async (id) => {
   if (!id || !mapInstance || !styleReady.value || id === activeProviderId) return
   const p = mapStore.providers.find((x) => x.id === id)
   if (!p || !p.enabled) return
-  const ok = await switcher.switchTo({
-    providerId: p.id,
-    style: styleForProvider(p),
-    coord: normalizeCoord(p.coordSystem),
-  })
-  if (!ok && switcher.error.value) initError.value = switcher.error.value
-  else if (ok) initError.value = ''
+  try {
+    const ok = await switcher.switchTo({
+      providerId: p.id,
+      style: styleForProvider(p),
+      coord: normalizeCoord(p.coordSystem),
+    })
+    if (!ok && switcher.error.value) initError.value = switcher.error.value
+    else if (ok) initError.value = ''
+  } catch (e) {
+    initError.value = (e as Error)?.message || '地图样式无效'
+  }
 })
 
 function onPoiAdded(item: PlanItem): void {
@@ -192,13 +195,18 @@ onMounted(async () => {
   if (!container.value) return
   // 行程页唯一底图：/map/config 的 defaultProviderId 对应的 provider
   const provider = mapStore.defaultProvider ?? mapStore.currentProvider
-  const style: string | MapStyleSpec = provider ? styleForProvider(provider) : DEFAULT_VECTOR_STYLE_URL
-  const coord: CoordSystem = provider ? normalizeCoord(provider.coordSystem) : 'WGS84'
-  activeProviderId = provider?.id ?? ''
-  applied.value = { style, coord }
-  if (provider && mapStore.currentProviderId !== provider.id) mapStore.select(provider.id)
+  if (!provider) {
+    initError.value = mapStore.error || '未配置可用的地图供应商'
+    return
+  }
 
   try {
+    const style = styleForProvider(provider)
+    const coord: CoordSystem = normalizeCoord(provider.coordSystem)
+    activeProviderId = provider.id
+    applied.value = { style, coord }
+    if (mapStore.currentProviderId !== provider.id) mapStore.select(provider.id)
+
     // style 必须直接传入构造参数：矢量 styleUrl 用 URL 字符串，raster 代理用 style 对象
     mapInstance = new maplibregl.Map({
       container: container.value,
@@ -244,7 +252,12 @@ onBeforeUnmount(() => {
 <template>
   <!-- h-full + 明确 min-h：容器高度链不断裂，canvas 不会被压成 0 高度 -->
   <div class="relative h-full w-full min-h-[160px] overflow-hidden rounded-lg border border-border bg-muted/40">
-    <div ref="container" class="absolute inset-0" />
+    <!--
+      MapLibre 会给容器追加 .maplibregl-map 类，其样式表里 position:relative 会覆盖
+      Tailwind 的 absolute（两者特异度相同、后加载者胜），导致容器高度塌成 0。
+      因此这里不用 absolute inset-0，改用 h-full w-full 让高度直接来自父级。
+    -->
+    <div ref="container" class="h-full w-full" />
 
     <!-- 地图上方正中间：紧凑搜索框，结果以浮层下拉展示，不铺满遮挡地图 -->
     <div v-if="showTools" class="absolute left-1/2 top-2 z-20 w-[min(92%,340px)] -translate-x-1/2">

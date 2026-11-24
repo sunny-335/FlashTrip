@@ -201,43 +201,45 @@ onMounted(() => { void Promise.all([load(), loadPlanOptions()]) })
       <EmptyState v-if="!items.length" title="还没有预订记录" description="把机票、酒店、门票的确认信息记在这里。" :icon="Plane">
         <Button size="sm" @click="openCreate"><Plus class="h-3.5 w-3.5" /> 新增第一条</Button>
       </EmptyState>
-      <div v-else class="overflow-x-auto rounded-lg border border-border bg-card">
-        <table class="w-full text-left text-xs">
-          <thead class="border-b border-border text-muted-foreground">
-            <tr>
-              <th class="px-3 py-2 font-medium">类型 / 供应商</th>
-              <th class="px-3 py-2 font-medium">预订号</th>
-              <th class="px-3 py-2 font-medium">时间</th>
-              <th class="px-3 py-2 font-medium">金额</th>
-              <th class="px-3 py-2 font-medium">状态</th>
-              <th class="px-3 py-2 font-medium">关联</th>
-              <th class="px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-border">
-            <tr v-for="b in items" :key="b.id" class="hover:bg-muted/40">
-              <td class="px-3 py-2">
-                <span class="block font-medium text-foreground">{{ b.vendor || '未填写供应商' }}</span>
-                <span class="text-[10px] text-muted-foreground">{{ typeLabel(b.type) }}<span v-if="b.holder"> · {{ b.holder }}</span></span>
-              </td>
-              <td class="px-3 py-2 font-mono text-[11px] text-foreground">{{ b.booking_no || '—' }}</td>
-              <td class="px-3 py-2 text-muted-foreground">{{ formatDate(b.start_at) }}<span v-if="b.end_at"> → {{ formatDate(b.end_at) }}</span></td>
-              <td class="px-3 py-2 text-foreground">{{ formatMoney(b.amount, b.currency) }}</td>
-              <td class="px-3 py-2 text-muted-foreground">{{ statusLabel(b.status) }}</td>
-              <td class="px-3 py-2 text-[11px] text-muted-foreground">
-                <span v-if="dayName(b.day_id)" class="block">{{ dayName(b.day_id) }}</span>
-                <span v-if="itemName(b.plan_item_id)" class="block">{{ itemName(b.plan_item_id) }}</span>
-                <span v-if="!dayName(b.day_id) && !itemName(b.plan_item_id)">—</span>
-              </td>
-              <td class="px-3 py-2">
-                <div class="flex justify-end gap-1.5">
-                  <Button variant="outline" size="sm" @click="openEdit(b)"><Pencil class="h-3.5 w-3.5" /> 编辑</Button>
-                  <Button variant="ghost" size="sm" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteTarget = b"><Trash2 class="h-3.5 w-3.5" /> 删除</Button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <article v-for="b in items" :key="b.id" class="group overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-shadow hover:shadow-md">
+          <div class="flex items-center justify-between border-b border-border bg-muted/35 px-4 py-3">
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Plane class="size-4" /></span>
+              <div class="min-w-0">
+                <p class="truncate text-sm font-semibold text-foreground">{{ b.vendor || '未填写供应商' }}</p>
+                <p class="text-[10px] text-muted-foreground">{{ typeLabel(b.type) }}<span v-if="b.holder"> · {{ b.holder }}</span></p>
+              </div>
+            </div>
+            <span class="rounded-full bg-secondary px-2 py-1 text-[10px] font-medium text-secondary-foreground">{{ statusLabel(b.status) }}</span>
+          </div>
+          <div class="space-y-3 p-4">
+            <div class="grid grid-cols-2 gap-2 rounded-lg bg-muted/35 p-3">
+              <div><p class="text-[10px] text-muted-foreground">开始时间</p><p class="mt-1 text-xs font-medium text-foreground">{{ formatDate(b.start_at) || '待安排' }}</p></div>
+              <div><p class="text-[10px] text-muted-foreground">结束时间</p><p class="mt-1 text-xs font-medium text-foreground">{{ formatDate(b.end_at) || '—' }}</p></div>
+            </div>
+            <div class="flex items-end justify-between gap-3">
+              <div class="min-w-0">
+                <p class="text-[10px] text-muted-foreground">预订编号</p>
+                <p class="truncate font-mono text-xs font-medium text-foreground">{{ b.booking_no || '未填写' }}</p>
+              </div>
+              <div class="shrink-0 text-right">
+                <p class="text-[10px] text-muted-foreground">金额</p>
+                <p class="mt-0.5 text-sm font-semibold text-foreground">{{ formatMoney(b.amount, b.currency) }}</p>
+              </div>
+            </div>
+            <div class="space-y-1 border-t border-border pt-2 text-[11px] text-muted-foreground">
+              <p v-if="dayName(b.day_id)" class="flex items-center gap-1.5"><CalendarDays class="size-3 shrink-0" />{{ dayName(b.day_id) }}</p>
+              <p v-if="itemName(b.plan_item_id)" class="truncate">关联地点：{{ itemName(b.plan_item_id) }}</p>
+              <p v-if="b.note" class="line-clamp-2">{{ b.note }}</p>
+              <p v-if="!dayName(b.day_id) && !itemName(b.plan_item_id) && !b.note" class="text-muted-foreground/70">暂无补充信息</p>
+            </div>
+          </div>
+          <div class="flex justify-end gap-1.5 border-t border-border px-4 py-3">
+            <Button variant="outline" size="sm" @click="openEdit(b)"><Pencil class="h-3.5 w-3.5" /> 编辑</Button>
+            <Button variant="ghost" size="sm" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteTarget = b"><Trash2 class="h-3.5 w-3.5" /> 删除</Button>
+          </div>
+        </article>
       </div>
     </template>
 

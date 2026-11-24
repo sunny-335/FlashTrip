@@ -44,8 +44,13 @@ async function logout() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-background text-foreground">
-    <header v-if="!ui.isMobile" class="sticky top-0 z-30 h-14 border-b border-border bg-card/90 backdrop-blur">
+  <!--
+    外壳用 flex 列布局：header/main 为同一列，main 取剩余高度。
+    若 main 用 min-h-screen，会与 56px 顶栏叠加出 56px 溢出，
+    导致行程详情等整屏页面出现多余滚动条。
+  -->
+  <div class="flex min-h-screen flex-col overflow-x-hidden bg-background text-foreground">
+    <header v-if="!ui.isMobile" class="sticky top-0 z-30 h-14 shrink-0 border-b border-border bg-card/90 backdrop-blur">
       <TripNavCenter v-if="isTrip" />
       <div v-else class="relative mx-auto grid h-full max-w-[1600px] grid-cols-[1fr_auto_1fr] items-center px-5">
         <RouterLink to="/dashboard" class="flex w-fit items-center gap-2 font-semibold tracking-tight">
@@ -65,7 +70,7 @@ async function logout() {
     </header>
 
     <!-- 行程详情在手机端隐藏主导航后，保留返回与行程设置入口。 -->
-    <div v-if="ui.isMobile && isTrip" class="sticky top-0 z-30 flex h-12 items-center justify-between border-b border-border bg-card/95 px-3 backdrop-blur">
+    <div v-if="ui.isMobile && isTrip" class="sticky top-0 z-30 flex h-12 shrink-0 items-center justify-between border-b border-border bg-card/95 px-3 backdrop-blur">
       <button class="flex min-h-11 items-center gap-1 text-sm text-muted-foreground" @click="router.push('/trips')">
         <ArrowLeft class="size-4" /> 返回
       </button>
@@ -77,7 +82,7 @@ async function logout() {
 
     <!-- 手机端为底部导航栏预留安全区高度 -->
     <main
-      class="min-h-screen"
+      class="min-h-0 flex-1"
       :style="showBottomNav ? { paddingBottom: 'calc(4rem + var(--safe-bottom))' } : undefined"
     >
       <slot />

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * 第 4 步：地图底图供应商。下拉只显示品牌名，选中后自动带出署名词与审图号（只读）；
- * 仅填写密钥，POST /wizard/test-map 只传 provider_id，连通性地址由后端预设带出。
+ * 仅填写密钥，POST /wizard/test-map 传 provider_id 与当前密钥，连通性地址由后端预设带出。
  * 样式地址、瓦片模板、坐标系、署名与审图号一律不手填，也不展示任何合规免责声明。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { MapPinned, CheckCircle2 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import Button from '@/components/ui/Button.vue'
@@ -16,35 +16,69 @@ const props = defineProps<{ form: InstallIn; probe: WizardProbe }>()
 const cfg = useConfigStore()
 const testing = ref(false)
 const preset = ref(props.form.map_providers[0]?.id ?? MAP_PRESETS[0].id)
+let probeVersion = 0
 
 const presetOptions = MAP_PRESETS.map((p) => ({ value: p.id, label: p.label }))
 const selected = computed(() => MAP_PRESETS.find((p) => p.id === preset.value) ?? MAP_PRESETS[0])
 
 watch(preset, (id) => {
+  probeVersion += 1
+  testing.value = false
   const m = props.form.map_providers[0]
-  if (m) m.id = id
+  if (m) {
+    m.id = id
+    m.key = ''
+  }
   props.form.map_default_provider_id = id
   props.probe.map.tested = false
   props.probe.map.ok = false
   props.probe.map.error = ''
+  props.probe.map.skipped = false
+  // 切换供应商后自动重新探测，省去手动再点一次
+  void test()
+})
+
+watch(() => props.form.map_providers[0]?.key, () => {
+  probeVersion += 1
+  testing.value = false
+  props.probe.map.tested = false
+  props.probe.map.ok = false
+  props.probe.map.error = ''
+  props.probe.map.skipped = false
 })
 
 async function test() {
+  const version = ++probeVersion
   testing.value = true
   props.probe.map.error = ''
   props.probe.map.tested = true
+  if (selected.value.needsKey && !props.form.map_providers[0]?.key.trim()) {
+    props.probe.map.ok = false
+    props.probe.map.skipped = false
+    props.probe.map.error = `${selected.value.label}需要先配置密钥；可跳过连通性探测，但安装仍要求密钥。`
+    testing.value = false
+    return
+  }
   try {
-    const r = await cfg.testMap({ provider_id: preset.value })
+    const r = await cfg.testMap({
+      provider_id: preset.value,
+      key: props.form.map_providers[0]?.key ?? '',
+    })
+    if (version !== probeVersion) return
     props.probe.map.ok = r.ok
     props.probe.map.status = r.status_code ?? 0
     props.probe.map.skipped = Boolean(r.skipped)
   } catch (e) {
+    if (version !== probeVersion) return
     props.probe.map.ok = false
     props.probe.map.error = e instanceof ApiError ? e.message : (e as Error).message
   } finally {
-    testing.value = false
+    if (version === probeVersion) testing.value = false
   }
 }
+
+onMounted(() => { void test() })
+onUnmounted(() => { probeVersion += 1 })
 </script>
 
 <template>
@@ -74,7 +108,7 @@ async function test() {
     <div v-if="form.map_providers[0]" class="space-y-1.5">
       <label class="text-xs font-medium">密钥</label>
       <Input v-model="form.map_providers[0].key" type="password" placeholder="留空表示无需密钥或保留已配置密钥" autocomplete="new-password" />
-      <p class="text-[11px] text-muted-foreground">密钥经加密后仅存于服务端，前端永不获取明文；免密钥供应商可留空。</p>
+      <p class="text-[11px] text-muted-foreground">{{ selected.needsKey ? '当前供应商需要密钥才能启用底图。' : '当前供应商免密钥可使用底图；配置服务密钥后还可启用地点搜索等能力。' }} 密钥经加密后仅存于服务端，前端永不获取明文。</p>
     </div>
 
     <div class="flex flex-wrap items-center gap-2">

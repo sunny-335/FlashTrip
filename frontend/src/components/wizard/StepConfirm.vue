@@ -9,9 +9,6 @@ import { MAP_PRESETS, type InstallIn, type WizardProbe } from '@/stores/config'
 const props = defineProps<{ form: InstallIn; probe: WizardProbe }>()
 const emit = defineEmits<{ edit: [step: number] }>()
 
-function maskUrl(u: string): string {
-  return u.replace(/(\/\/[^:/@]+:)[^@]+@/, '$1••••@')
-}
 const aiSkipped = computed(() => props.probe.ai.skipped || props.form.ai_providers.length === 0)
 const ai = computed(() => props.form.ai_providers[0])
 const map = computed(() => props.form.map_providers[0])
@@ -27,8 +24,16 @@ const mapLabel = computed(() => MAP_PRESETS.find((p) => p.id === map.value?.id)?
         <span class="text-xs font-medium">数据库</span>
         <button class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary" @click="emit('edit', 0)"><Pencil class="h-3 w-3" />修改</button>
       </div>
-      <p class="break-all font-mono text-xs text-foreground">{{ maskUrl(form.database_url) }}</p>
+      <template v-if="form.database_dialect === 'postgresql'">
+        <p class="break-all text-xs text-foreground">
+          {{ form.db_username }}@{{ form.db_host }}:{{ form.db_port }} / {{ form.db_name }}
+        </p>
+      </template>
+      <p v-else class="break-all font-mono text-xs text-foreground">SQLite · /data/flashtrip.db</p>
       <Badge v-if="probe.db.dialect" variant="outline">{{ probe.db.dialect }}</Badge>
+      <p class="text-xs text-muted-foreground">
+        Redis：{{ form.redis_enabled ? `已启用（${form.redis_host}:${form.redis_port}）` : '未启用（进程内事件总线）' }}
+      </p>
     </Card>
 
     <Card class="space-y-1.5">
@@ -84,7 +89,6 @@ const mapLabel = computed(() => MAP_PRESETS.find((p) => p.id === map.value?.id)?
         <button class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary" @click="emit('edit', 5)"><Pencil class="h-3 w-3" />修改</button>
       </div>
       <p class="text-xs text-muted-foreground">主密钥：••••••••（{{ probe.secretBackedUp ? '已下载备份' : '未备份' }}）</p>
-      <p class="text-xs text-muted-foreground">Redis：{{ form.redis_enabled ? '已启用' : '未启用（进程内事件总线）' }}</p>
       <p class="text-xs text-muted-foreground">AI 写工具：{{ form.ai_tools_enabled ? '启用' : '关闭' }}</p>
     </Card>
   </div>

@@ -41,10 +41,11 @@ export interface MapPreset {
   label: string
   attribution: string
   auditNumber: string
+  needsKey: boolean
 }
 export const MAP_PRESETS: MapPreset[] = [
-  { id: 'amap', label: '高德地图', attribution: '© 高德地图', auditNumber: '' },
-  { id: 'tianditu', label: '天地图', attribution: '© 天地图', auditNumber: '' },
+  { id: 'amap', label: '高德地图', attribution: '© 高德地图', auditNumber: '', needsKey: false },
+  { id: 'tianditu', label: '天地图', attribution: '© 天地图', auditNumber: '', needsKey: true },
 ]
 
 /** 邮件配置：与后端 mail 段字段一致；password 留空表示保留已保存密文。 */
@@ -102,10 +103,22 @@ export interface MapProviderIn {
   enabled: boolean
 }
 export interface InstallIn {
+  /** 兼容字段：完整连接串。结构化字段齐全时后端优先使用结构化字段。 */
   database_url: string
   database_dialect: string
+  /** 结构化数据库字段（PostgreSQL 外部地址）。 */
+  db_host: string
+  db_port: number
+  db_username: string
+  db_password: string
+  db_name: string
   redis_url: string
   redis_enabled: boolean
+  /** 结构化 Redis 字段。 */
+  redis_host: string
+  redis_port: number
+  redis_password: string
+  redis_db: number
   admin: AdminIn
   ai_providers: AiProviderIn[]
   map_providers: MapProviderIn[]
@@ -146,10 +159,19 @@ export interface WizardProbe {
 /** 初始安装表单：数据库默认 SQLite；AI/Map 各预置一条可编辑配置；邮件默认不跳过。 */
 export function createInstallForm(): InstallIn {
   return {
-    database_url: 'sqlite:////data/flashtrip.db',
+    database_url: '',
     database_dialect: '',
+    db_host: '',
+    db_port: 5432,
+    db_username: '',
+    db_password: '',
+    db_name: 'flashtrip',
     redis_url: '',
     redis_enabled: false,
+    redis_host: '',
+    redis_port: 6379,
+    redis_password: '',
+    redis_db: 0,
     admin: { username: '', password: '', email: null, phone: null, display_name: '' },
     ai_providers: [
       {
@@ -168,7 +190,7 @@ export function createInstallForm(): InstallIn {
     ],
     map_default_provider_id: MAP_PRESETS[0].id,
     audit_number: '',
-    ai_tools_enabled: false,
+    ai_tools_enabled: true,
     secret_key: '',
     mail: createMailConfig(),
     mail_skipped: false,
@@ -209,7 +231,19 @@ export function buildPayload(form: InstallIn, probe: WizardProbe): InstallIn {
   if (payload.map_providers[0]) {
     payload.map_default_provider_id = payload.map_providers[0].id
   }
-  payload.redis_enabled = !probe.redis.skipped && payload.redis_url.trim().length > 0
+  // Redis：填写地址即启用；未填写地址或未通过测试则视为关闭
+  payload.redis_enabled = payload.redis_host.trim().length > 0 && probe.redis.ok
+  if (!payload.redis_enabled) {
+    payload.redis_url = ''
+    payload.redis_password = ''
+  }
+  // SQLite 由后端固定为数据目录单文件，前端不提交连接串
+  if (payload.database_dialect !== 'postgresql') {
+    payload.database_url = ''
+    payload.db_host = ''
+    payload.db_username = ''
+    payload.db_password = ''
+  }
   payload.database_dialect = probe.db.dialect || payload.database_dialect
   // 跳过邮件时只带 mail_skipped 标记，不提交半填的 SMTP 配置
   if (payload.mail_skipped) payload.mail = null
@@ -225,12 +259,28 @@ export const useConfigStore = defineStore('config', () => {
     return s
   }
 
-  const testDb = (url: string) => api.post<DbTestResult>('/wizard/test-db', { url })
-  const testRedis = (url: string) => api.post<RedisTestResult>('/wizard/test-redis', { url })
+  /** 数据库探测：结构化字段（地址/端口/用户名/密码/库名），后端负责拼装连接串。 */
+  const testDb = (payload: {
+    dialect?: string
+    host?: string
+    port?: number
+    username?: string
+    password?: string
+    database?: string
+    url?: string
+  }) => api.post<DbTestResult>('/wizard/test-db', payload)
+  /** Redis 探测：结构化字段（地址/端口/密码/库序号）。 */
+  const testRedis = (payload: {
+    host?: string
+    port?: number
+    password?: string
+    database?: number
+    url?: string
+  }) => api.post<RedisTestResult>('/wizard/test-redis', payload)
   const testAi = (payload: { base_url: string; api_key: string; timeout_s?: number }) =>
     api.post<AiTestResult>('/wizard/test-ai', { timeout_s: 10, ...payload })
   /** 只传 provider_id，连通性地址由后端预设带出，不再提交任何手填 URL。 */
-  const testMap = (payload: { provider_id: string }) =>
+  const testMap = (payload: { provider_id: string; key?: string }) =>
     api.post<MapTestResult>('/wizard/test-map', payload)
   const testMail = (payload: MailConfigIn) =>
     api.post<MailTestResult>('/wizard/test-mail', payload)

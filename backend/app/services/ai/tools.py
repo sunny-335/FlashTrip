@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -40,6 +40,11 @@ TOOL_DEFS: dict[str, dict[str, Any]] = {
         "parameters": {"type": "object", "properties": {"trip_id": {"type": "string"}}, "additionalProperties": False},
         "write": False, "permission": None,
     },
+    "get_trip_days": {
+        "description": "读取指定行程的日期范围与全部行程日（含 day_id、day_index、日期），用于按天排程",
+        "parameters": {"type": "object", "properties": {"trip_id": {"type": "string"}}, "additionalProperties": False},
+        "write": False, "permission": None,
+    },
     "get_expenses": {
         "description": "读取指定行程的费用记录（只读）",
         "parameters": {"type": "object", "properties": {"trip_id": {"type": "string"}}, "additionalProperties": False},
@@ -59,12 +64,21 @@ TOOL_DEFS: dict[str, dict[str, Any]] = {
         "write": False, "permission": None,
     },
     "add_plan_item": {
-        "description": "新增一个行程安排条目（写操作，需前端确认，权限 plan:write）",
+        "description": (
+            "新增一个行程安排条目（写操作，需前端确认，权限 plan:write）。"
+            "排程时必须指定落点：优先用 day_id，其次用 day_index（第几天，1 起算），"
+            "再次用 date（YYYY-MM-DD）；行程日信息可用 get_trip_days 查询。"
+            "多天行程必须把条目分散到不同天，不要全部落在同一天。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"}, "name": {"type": "string"},
                 "type": {"type": "string"}, "day_id": {"type": "string"},
+                "day_index": {"type": "integer", "description": "第几天（1 起算）；与 day_id 二选一"},
+                "date": {"type": "string", "description": "该条目所在日期 YYYY-MM-DD"},
+                "start_time": {"type": "string", "description": "开始时间 ISO 8601"},
+                "end_time": {"type": "string", "description": "结束时间 ISO 8601"},
                 "bucket": {"type": "string"}, "sort_key": {"type": "string"},
                 "lng": {"type": "number"}, "lat": {"type": "number"},
                 "coord_system": {"type": "string"}, "note": {"type": "string"},
@@ -405,6 +419,182 @@ class ToolRegistry:
                payload={"tool": name, "arguments": args, "result": result})
         return {"tool": name, "result": result}
 
+    def _days(self, trip_id: str) -> list[Any]:
+        """按天序返回行程日（排除软删）。"""
+        from app.models.trip import TripDay
+
+        if not trip_id:
+            return []
+        return (
+            self.db.query(TripDay)
+            .filter(TripDay.trip_id == trip_id, TripDay.deleted_at.is_(None))
+            .order_by(TripDay.day_index)
+            .all()
+        )
+
+    def _next_sort_key(self, day_id: str) -> str:
+        """同一批新增条目按追加顺序排列（末尾追加启发式，与人工侧一致）。"""
+        from app.models.plan import PlanItem
+
+        mx = (
+            self.db.query(PlanItem.sort_key)
+            .filter(PlanItem.trip_id == self.trip_id, PlanItem.day_id == day_id)
+            .order_by(PlanItem.sort_key.desc())
+            .first()
+        )
+        current = mx[0] if mx else None
+        return f"{current}z" if current else "a0"
+
+    def _resolve_target_day(self, args: dict, trip_id: str | None) -> str | None:
+        """解析条目应落在哪一天。
+
+        优先级：
+        1. 显式 day_id（必须是本行程的行程日，否则忽略）；
+        2. day_index / 第 N 天（1 起算；超出已有行程日则自动补建该天）；
+        3. 日期 start_date / date（匹配行程日日期；超出范围则按日期补建）；
+        4. start_time 的日期部分（匹配行程日日期）；
+        5. 模型未指定 → 按当次写入顺序在已有行程日之间轮转，
+           保证「一次新增多条」不会全部落在同一天。
+        """
+        days = self._days(trip_id or "")
+        if not days:
+            return None
+        by_id = {d.id: d for d in days}
+
+        explicit_day_id = str(args.get("day_id") or "").strip()
+        if explicit_day_id:
+            return explicit_day_id if explicit_day_id in by_id else None
+
+        # day_index：兼容「第 N 天」的自然语言参数
+        raw_index = args.get("day_index", args.get("day"))
+        if raw_index is not None:
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                index = 0
+            if index > 0:
+                # 补齐目标日之前缺失的所有日期，确保行程日序号连续
+                for missing_index in range(1, index + 1):
+                    self._ensure_day(trip_id, missing_index)
+                days = self._days(trip_id)
+                matched = next((d for d in days if d.day_index == index), None)
+                return matched.id if matched else None
+
+        # 日期：优先显式日期，其次 start_time 的日期部分
+        raw_date = args.get("date") or args.get("start_date")
+        if not raw_date:
+            start_time = args.get("start_time")
+            if isinstance(start_time, str) and start_time.strip():
+                raw_date = start_time.strip()[:10]
+        if raw_date:
+            raw_target = str(raw_date).strip()
+            try:
+                target_date = date.fromisoformat(raw_target)
+            except ValueError as exc:
+                raise AppError(ErrorCode.VALIDATION, "日期必须是有效的 YYYY-MM-DD") from exc
+            if target_date.isoformat() != raw_target:
+                raise AppError(ErrorCode.VALIDATION, "日期必须使用 YYYY-MM-DD 格式")
+            matched = next((d for d in days if d.date == target_date), None)
+            if matched:
+                return matched.id
+
+            from app.models.trip import Trip
+
+            trip = self.db.get(Trip, trip_id) if trip_id else None
+            anchor = trip.start_date if trip else None
+            anchor_index = 1
+            if anchor is None:
+                dated_days = [d for d in days if d.date is not None]
+                if dated_days:
+                    first = min(dated_days, key=lambda d: d.date)
+                    anchor, anchor_index = first.date, first.day_index
+                else:
+                    last = max(days, key=lambda d: d.day_index)
+                    anchor, anchor_index = target_date, last.day_index + 1
+                    if trip:
+                        trip.start_date = target_date - timedelta(days=last.day_index)
+                        for day in days:
+                            day.date = trip.start_date + timedelta(days=day.day_index - 1)
+            target_index = anchor_index + (target_date - anchor).days
+            if target_index < 1:
+                shift = 1 - target_index
+                for offset, day in enumerate(days, start=1):
+                    day.day_index = -offset
+                self.db.flush()
+                for day in days:
+                    day.day_index = abs(day.day_index) + shift
+                    day.sort_key = f"d{day.day_index:06d}"
+                    day.date = target_date + timedelta(days=day.day_index - 1)
+                if trip:
+                    trip.start_date = target_date
+                target_index = 1
+                self.db.commit()
+            occupied = next((d for d in days if d.day_index == target_index), None)
+            if occupied and occupied.date != target_date:
+                later_days = [d for d in days if d.day_index >= target_index]
+                for offset, day in enumerate(later_days, start=1):
+                    day.day_index = -offset
+                self.db.flush()
+                for day in later_days:
+                    old_date = day.date
+                    day.day_index = abs(day.day_index) + target_index
+                    day.sort_key = f"d{day.day_index:06d}"
+                    if old_date:
+                        day.date = old_date + timedelta(days=1)
+                if trip and trip.end_date:
+                    trip.end_date += timedelta(days=1)
+            for missing_index in range(1, target_index + 1):
+                self._ensure_day(trip_id, missing_index)
+            days = self._days(trip_id or "")
+            matched = next((d for d in days if d.day_index == target_index), None)
+            if matched:
+                matched.date = target_date
+                if trip and (trip.end_date is None or trip.end_date < target_date):
+                    trip.end_date = target_date
+                self.db.commit()
+                return matched.id
+
+        # 模型完全没给落点：轮转到下一天空位，避免全部堆在第一天
+        self._day_cursor = getattr(self, "_day_cursor", -1) + 1
+        return days[self._day_cursor % len(days)].id
+
+    def _ensure_day(self, trip_id: str | None, day_index: int) -> str | None:
+        """行程日不足时按需补建第 day_index 天，并同步行程结束日期。
+
+        补建沿用人工侧的 TripDay 规则（day_index / sort_key / date），
+        日期按行程开始日期顺延，保证行程天数与结束日期始终自洽。
+        """
+        from datetime import date as date_cls, timedelta
+
+        from app.core.security import new_id
+        from app.models.trip import Trip, TripDay
+
+        if not trip_id:
+            return None
+        trip = self.db.get(Trip, trip_id)
+        if trip is None:
+            return None
+        days = self._days(trip_id)
+        existing = next((d for d in days if d.day_index == day_index), None)
+        if existing:
+            return existing.id
+        day_date = None
+        if trip.start_date:
+            day_date = trip.start_date + timedelta(days=day_index - 1)
+        day = TripDay(
+            id=new_id(),
+            trip_id=trip_id,
+            day_index=day_index,
+            sort_key=f"d{day_index:06d}",
+            date=day_date,
+        )
+        self.db.add(day)
+        # 行程结束日期随最后一天顺延，避免「天数不够」时仍停留在旧区间
+        if day_date and (trip.end_date is None or trip.end_date < day_date):
+            trip.end_date = day_date
+        self.db.commit()
+        return day.id
+
     def _dispatch(self, name: str, args: dict) -> Any:
         db = self.db
         if db is None:
@@ -421,6 +611,35 @@ class ToolRegistry:
             from app.models.plan import PlanItem
 
             return _query(db, PlanItem, {"trip_id": trip_id}, 100)
+
+        if name == "get_trip_days":
+            from app.models.trip import Trip, TripDay
+
+            trip = db.get(Trip, trip_id) if trip_id else None
+            days = (
+                db.query(TripDay)
+                .filter(TripDay.trip_id == trip_id, TripDay.deleted_at.is_(None))
+                .order_by(TripDay.day_index)
+                .all()
+                if trip_id
+                else []
+            )
+            return {
+                "trip_id": trip_id,
+                "title": getattr(trip, "title", None),
+                "start_date": trip.start_date.isoformat() if trip and trip.start_date else None,
+                "end_date": trip.end_date.isoformat() if trip and trip.end_date else None,
+                "total_days": len(days),
+                "days": [
+                    {
+                        "day_id": day.id,
+                        "day_index": day.day_index,
+                        "date": day.date.isoformat() if day.date else None,
+                        "title": day.title,
+                    }
+                    for day in days
+                ],
+            }
 
         if name == "get_expenses":
             from app.models.expense import Expense
@@ -523,9 +742,15 @@ class ToolRegistry:
         if name == "add_plan_item":
             from app.models.plan import PlanItem
 
+            day_id = self._resolve_target_day(args, trip_id)
             data = _coerce(PlanItem, args, {"trip_id": trip_id, "id": new_id()})
             if "title" in data and not data["title"] and args.get("name"):
                 data["title"] = str(args["name"])
+            # 落点以解析结果为准：模型给的非法 day_id 不得直接写进条目
+            data["day_id"] = day_id
+            # 排入指定的那一天；模型没给日期时按天序顺延，避免全部堆在同一天
+            if day_id:
+                data.setdefault("sort_key", self._next_sort_key(day_id))
             item = PlanItem(**data)
             db.add(item)
             db.commit()

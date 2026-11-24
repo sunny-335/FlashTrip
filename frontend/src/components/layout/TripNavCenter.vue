@@ -247,12 +247,12 @@ async function setCurrent() {
 </script>
 
 <template>
-  <div class="mx-auto flex h-full max-w-[1600px] items-center gap-2 px-3 sm:gap-4 sm:px-5">
-    <button class="flex shrink-0 items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground" @click="router.push('/trips')">
+  <div class="relative mx-auto grid h-full w-full max-w-[1600px] grid-cols-[1fr_auto_1fr] items-center px-3 sm:px-5">
+    <button class="z-10 flex w-fit shrink-0 items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground" @click="router.push('/trips')">
       <ArrowLeft class="h-4 w-4" /> <span class="hidden sm:inline">返回</span>
     </button>
-    <!-- 七 tab 在窄屏横向滚动，不溢出 -->
-    <nav class="nav-scroll flex min-w-0 flex-1 items-center gap-1 whitespace-nowrap">
+    <!-- 导航以视口中线为基准，左右功能区宽度变化不再推偏 tab -->
+    <nav class="nav-scroll absolute left-1/2 flex max-w-[calc(100%-12rem)] -translate-x-1/2 items-center gap-1 whitespace-nowrap">
       <RouterLink
         v-for="tab in tabs"
         :key="tab.name"
@@ -263,7 +263,7 @@ async function setCurrent() {
           : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
       >{{ tab.label }}</RouterLink>
     </nav>
-    <div class="shrink-0 flex items-center gap-1">
+    <div class="z-10 flex shrink-0 items-center justify-self-end gap-1">
       <button class="rounded-lg border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted" @click="shareOpen = true">分享</button>
       <button
         class="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted sm:px-3"

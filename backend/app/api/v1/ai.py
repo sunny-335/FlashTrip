@@ -124,6 +124,44 @@ def _context_hint(context: dict) -> dict | None:
     return {"role": "system", "content": "；".join(parts)}
 
 
+def _trip_days_hint(db: Session, trip_id: str) -> str | None:
+    """把行程的日期范围与行程日清单注入 system 消息。
+
+    没有这层提示时，模型看不到「第 2 天」对应的 day_id，排程就会全堆在同一天。
+    """
+    if not trip_id:
+        return None
+    try:
+        from app.models.trip import Trip, TripDay
+
+        trip = db.get(Trip, trip_id)
+        if trip is None:
+            return None
+        days = (
+            db.query(TripDay)
+            .filter(TripDay.trip_id == trip_id, TripDay.deleted_at.is_(None))
+            .order_by(TripDay.day_index)
+            .all()
+        )
+    except Exception:  # noqa: BLE001  行程日读取失败不阻断对话
+        return None
+    if not days:
+        return None
+    lines = [
+        "当前行程的日期与行程日（排程时必须把条目分散到不同天；"
+        "新增条目请用 day_id 或 day_index 指定落点）：",
+        f"- 行程：{trip.title}",
+        f"- 日期范围：{trip.start_date.isoformat() if trip.start_date else '未设置'}"
+        f" ~ {trip.end_date.isoformat() if trip.end_date else '未设置'}（共 {len(days)} 天）",
+    ]
+    for day in days:
+        lines.append(
+            f"- 第 {day.day_index} 天：day_id={day.id}"
+            f"，日期={day.date.isoformat() if day.date else '未设置'}"
+        )
+    return "\n".join(lines)
+
+
 def _own_conversation(db: Session, conversation_id: str, user: Any) -> AiConversation | None:
     """取属于当前用户且未删除的会话；不存在/越权一律返回 None。"""
     conv = db.get(AiConversation, conversation_id)
@@ -420,6 +458,14 @@ def chat(request: Request, payload: dict = Body(default={}), db: Session = Depen
     hint = _context_hint(_context(payload))
     if hint is not None:
         full_messages.append(hint)
+    # 注入行程日清单：模型据此把条目分散到不同天，而不是全排在同一天
+    context_trip_id = str(
+        _context(payload).get("trip_id") or _context(payload).get("tripId")
+        or payload.get("trip_id") or payload.get("tripId") or conv.trip_id or ""
+    )
+    days_hint = _trip_days_hint(db, context_trip_id)
+    if days_hint:
+        full_messages.append({"role": "system", "content": days_hint})
     full_messages.extend(messages)
 
     raw_last = request.headers.get("Last-Event-ID") or payload.get("last_event_id") or payload.get("lastEventId")

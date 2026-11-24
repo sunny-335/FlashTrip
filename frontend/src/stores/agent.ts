@@ -10,6 +10,7 @@ import { api, postSSE, ApiError } from '@/lib/api'
 export const TOOL_LABELS: Record<string, string> = {
   list_trips: '列出行程',
   get_plan: '读取行程安排',
+  get_trip_days: '读取行程日',
   get_expenses: '读取费用',
   search_poi: '搜索地点',
   get_bookings: '读取预订',
@@ -321,7 +322,10 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       const rows = await api.get<HistoryRow[]>(`/ai/conversations/${encodeURIComponent(id)}/messages`)
       conversationId.value = id
-      messages.value = rows.map((row, index) => {
+      // 逐条构建：工具结果行必须并入它对应的工具卡片。
+      // 若用 rows.map 一次性生成，映射过程中 messages.value 仍是旧数组，结果会丢失。
+      const built: ChatMessage[] = []
+      rows.forEach((row, index) => {
         let rawCalls = row.toolCalls
         if (!rawCalls && row.tool_calls_json) {
           try { rawCalls = JSON.parse(row.tool_calls_json) as HistoryRow['toolCalls'] } catch { rawCalls = [] }
@@ -331,15 +335,18 @@ export const useAgentStore = defineStore('agent', () => {
           name: call.name || 'tool', arguments: call.arguments ?? {}, needConfirm: false, status: 'done',
         }))
         if (row.role === 'tool' && row.toolCallId) {
-          const call = messages.value.flatMap((m) => m.toolCalls ?? []).find((item) => item.toolCallId === row.toolCallId)
+          // 工具结果行：并入已有卡片，不再单独生成气泡
+          const call = built.flatMap((m) => m.toolCalls ?? []).find((item) => item.toolCallId === row.toolCallId)
           if (call) { call.result = row.toolResult ?? row.content; call.status = 'done' }
+          return
         }
-        return {
+        built.push({
           id: row.id || `h${index}`,
-          role: row.role === 'user' ? 'user' as const : row.role === 'tool' ? 'tool' as const : 'assistant' as const,
+          role: row.role === 'user' ? 'user' as const : 'assistant' as const,
           content: row.content ?? '', toolCalls,
-        }
+        })
       })
+      messages.value = built
       pendingCalls.value = []
       error.value = ''
     } catch (e) {

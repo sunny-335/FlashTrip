@@ -56,19 +56,10 @@ async function sendTest() {
   <div class="space-y-4">
     <div class="flex items-start gap-2 rounded-lg border border-border bg-muted/50 p-3 text-xs leading-relaxed text-muted-foreground">
       <Mail class="mt-0.5 h-4 w-4 shrink-0" />
-      <span>邮件通知为可选项。现在配置或选择跳过均可；跳过之后仍可随时在「设置 → 邮件通知」中补充。</span>
+      <span>邮件通知为可选项。现在配置或点击左下角「跳过」均可；跳过之后仍可随时在「设置 → 邮件通知」中补充。</span>
     </div>
 
-    <label class="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-xs text-foreground">
-      <input v-model="form.mail_skipped" type="checkbox" class="h-3.5 w-3.5 accent-[var(--primary)]" />
-      跳过邮件配置
-    </label>
-
-    <div v-if="form.mail_skipped" class="rounded-lg border border-primary/30 bg-accent/50 p-3 text-xs leading-relaxed text-accent-foreground">
-      已跳过邮件配置，可直接进入下一步。安装完成后可在设置页的「邮件通知」中随时启用。
-    </div>
-
-    <template v-else>
+    <template v-if="!form.mail_skipped">
       <div class="grid gap-3 sm:grid-cols-2">
         <div class="space-y-1.5">
           <label class="text-xs font-medium">服务器地址 <span class="text-destructive">*</span></label>
@@ -133,9 +124,13 @@ async function sendTest() {
       </div>
 
       <p v-if="!hostOk || !fromOk" class="text-xs text-destructive">
-        带 * 的服务器地址与发件地址为必填项；填写完整后才能继续，或勾选上方「跳过邮件配置」。
+        带 * 的服务器地址与发件地址为必填项；填写完整后才能继续，或点击左下角「跳过」。
       </p>
       <p v-else class="text-xs text-muted-foreground">邮件配置已填写完整，可继续下一步。</p>
     </template>
+
+    <div v-if="form.mail_skipped" class="rounded-lg border border-primary/30 bg-accent/50 p-3 text-xs leading-relaxed text-accent-foreground">
+      已跳过邮件配置，可直接进入下一步。安装完成后可在设置页的「邮件通知」中随时启用。
+    </div>
   </div>
 </template>
